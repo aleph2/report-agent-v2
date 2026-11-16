@@ -15,8 +15,8 @@ An agent system that writes an assessment report from supplied source documents 
 5. **Small tool surface.** Report know-how goes into skill files, not tools or prompts in code.
 6. **Human input is data.** Answers and approvals are saved as assertions. Code never tests whether an approval exists.
 7. **One live variant.** No version numbers for prompts, schemas or interfaces. No backward compatibility. Git holds history.
-8. **End to end first.** Verify changes to report behavior with an end-to-end run using the scripted fake model. For documentation-only changes, verify the committed file directly.
-9. **Diagnose a failed run first.** Use the trace and saved output to find the cause. If an agent lacked information, clarify the skill, tool description or result. If the implementation failed, fix the code responsible. A new check in code needs the owner's decision.
+8. **End to end first.** Every change is shown to work by an end-to-end run.
+9. **A failed run is answered with information first:** a sentence in a skill, then a clearer tool description or result, then code. A new check in code is last and needs the owner's decision.
 
 ## How you work here
 
