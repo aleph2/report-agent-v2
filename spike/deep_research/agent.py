@@ -5,9 +5,9 @@ for conducting web research with strategic thinking and context management.
 """
 
 from datetime import datetime
+import os
 
 from langchain.chat_models import init_chat_model
-from langchain_google_genai import ChatGoogleGenerativeAI
 from deepagents import create_deep_agent
 
 from research_agent.prompts import (
@@ -44,11 +44,13 @@ research_sub_agent = {
     "tools": [tavily_search, think_tool],
 }
 
-# Model Gemini 3 
-# model = ChatGoogleGenerativeAI(model="gemini-3-pro-preview", temperature=0.0)
-
-# Model Claude 4.5
-model = init_chat_model(model="anthropic:claude-sonnet-4-5-20250929", temperature=0.0)
+model = init_chat_model(
+    model=os.environ["MODEL_NAME"],
+    model_provider="openai",
+    base_url=os.environ["OPENAI_BASE_URL"],
+    api_key=os.environ["OPENAI_API_KEY"],
+    temperature=0.0,
+)
 
 # Create the agent
 agent = create_deep_agent(
