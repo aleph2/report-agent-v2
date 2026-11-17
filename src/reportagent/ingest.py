@@ -17,6 +17,7 @@ def ingest(case_dir):
             for number, page in enumerate(pdf.pages, 1):
                 target = pages / f"page-{number:03d}.txt"
                 target.write_text(page.extract_text() or "", encoding="utf-8")
+                page.close()
                 index.append(f"- {target.relative_to(case_dir).as_posix()}")
     target = sources / "index.md"
     target.write_text("\n".join(index) + "\n", encoding="utf-8")
