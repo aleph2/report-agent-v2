@@ -4,6 +4,7 @@ description: Draft a cited assessment section from the evidence notes in /work/n
 ---
 Read /commission.md to understand the requested report and section.
 Read the evidence notes in /work/notes/ and write the section from those notes.
+If no notes file exists, write the section with every required item marked missing.
 Read a source page only to check a specific fact.
 Write the requested section to /work/sections/<nn>-<name>.md.
 Use Markdown with one # heading; use ## and ### for subsections as needed.

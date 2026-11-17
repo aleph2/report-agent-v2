@@ -13,6 +13,9 @@ from .ingest import ingest
 from .models import make_model
 
 
+GATHER_BUDGET_FRACTION = 0.6
+
+
 def main():
     parser = argparse.ArgumentParser(prog="reportagent")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -21,6 +24,7 @@ def main():
         command.add_argument("case", type=Path)
         if name == "run":
             command.add_argument("--max-tokens", type=int, required=True)
+            command.add_argument("--write-only", action="store_true")
     args = parser.parse_args()
     if args.command != "run":
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
@@ -34,7 +38,11 @@ def main():
         ("gather", "Gather evidence for the section requested in /commission.md."),
         ("write", "Write the section requested in /commission.md from the notes in /work/notes/."),
     ):
-        cap = TokenCapMiddleware(remaining, remind=phase == "gather")
+        gathering = phase == "gather"
+        if args.write_only and gathering:
+            continue
+        limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
+        cap = TokenCapMiddleware(limit, remind=gathering)
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
         state = {"messages": [HumanMessage(content=prompt)]}
         log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")

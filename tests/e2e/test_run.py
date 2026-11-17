@@ -12,20 +12,23 @@ from reportagent import cli, models
 from tests.fake_model import ScriptedModel, call
 
 
-@pytest.mark.parametrize("cap,gathered,written", [(100, 3, 4), (6, 3, 3), (3, 3, 0), (2, 2, 0)])
-def test_cli_run(tmp_path, monkeypatch, capsys, cap, gathered, written):
+@pytest.mark.parametrize("cap,gather_costs,written", [(100, [1, 1, 1], 4), (6, [1, 1, 1], 3), (4, [1, 1], 2), (3, [3], 0)])
+def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     (tmp_path / "sources").mkdir()
     (tmp_path / "commission.md").write_text("Write the hydrology section.")
     copyfile(Path(__file__).parents[1] / "fixtures/one-page.pdf", tmp_path / "sources/one-page.pdf")
     sentence = "The site drains toward the eastern channel."
     notes = f"{sentence} [one-page.pdf, page 1]\nMISSING: Drainage dimensions."
     section = f"# Hydrology\n\n{sentence} [one-page.pdf, page 1]\n\n## 缺失与待补充事项\n\nDrainage dimensions."
-    replies = [call("read_file", file_path="/sources/one-page/page-001.txt"),
-               call("write_file", file_path="/work/notes/hydrology.md", content=notes), AIMessage(content="Evidence saved."),
-               call("read_file", file_path="/work/notes/hydrology.md"),
+    gather = [call("read_file", file_path="/sources/one-page/page-001.txt"),
+              call("write_file", file_path="/work/notes/hydrology.md", content=notes), AIMessage(content="Evidence saved.")]
+    replies = [call("read_file", file_path="/work/notes/hydrology.md"),
                call("write_file", file_path="/work/sections/01-hydrology.md", content=section),
                call("read_file", file_path="/work/sections/01-hydrology.md"), AIMessage(content="Done.")]
-    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for reply in replies])
+    gathered = sum(gather_costs)
+    replies = [*gather[:len(gather_costs)], *replies]
+    costs = [*gather_costs, 1, 1, 1, 1]
+    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=cost, output_tokens=0, total_tokens=cost)}) for reply, cost in zip(replies, costs)])
     made, limits = [], []
     monkeypatch.setattr(cli, "make_model", lambda: made.append(True) or model)
     middleware = cli.TokenCapMiddleware
@@ -37,8 +40,9 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gathered, written):
     for args in (("ingest", str(tmp_path)), ("run", str(tmp_path), "--max-tokens", str(cap))):
         monkeypatch.setattr(sys, "argv", ["reportagent", *args])
         cli.main()
-    assert len(made) == 1 and limits == [cap, max(0, cap - gathered)]
-    assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
+    assert len(made) == 1 and limits == [int(cap * 0.6), max(0, cap - gathered)]
+    if len(gather_costs) > 1:
+        assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
     logs = sorted((tmp_path / "work/runs").glob("*.jsonl"))
     assert len(logs) == 2
     research, draft = [[json.loads(line) for line in log.read_text().splitlines()] for log in logs]
@@ -56,6 +60,27 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gathered, written):
     else:
         assert len(draft) == 2 and "cap=0" in draft[-1]["content"]
         assert not (tmp_path / "work/sections").exists()
+
+
+def test_cli_write_only(tmp_path, monkeypatch):
+    (tmp_path / "commission.md").write_text("Write the hydrology section.")
+    notes = "The site drains east. [one-page.pdf, page 1]"
+    (tmp_path / "work/notes").mkdir(parents=True)
+    (tmp_path / "work/notes/hydrology.md").write_text(notes)
+    section = f"# Hydrology\n\n{notes}"
+    replies = [call("read_file", file_path="/work/notes/hydrology.md"),
+               call("write_file", file_path="/work/sections/01-hydrology.md", content=section), AIMessage(content="Done.")]
+    model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for m in replies])
+    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "3", "--write-only"])
+    cli.main()
+    logs = list((tmp_path / "work/runs").glob("*.jsonl"))
+    assert len(logs) == 1 and logs[0].name.endswith("-write.jsonl")
+    transcript = [json.loads(line) for line in logs[0].read_text().splitlines()]
+    assert transcript[0]["content"] == "Write the section requested in /commission.md from the notes in /work/notes/."
+    assert notes in transcript[2]["content"] and transcript[-1]["content"] == "Done."
+    assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
+    assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
 
 
 def test_model_from_current_dotenv(tmp_path, monkeypatch):
