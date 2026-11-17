@@ -8,7 +8,7 @@ from deepagents.backends import FilesystemBackend
 
 def build_agent(case_dir, model, middleware=()):
     case_dir = Path(case_dir)
-    for skill in ("gather-evidence", "write-section"):
+    for skill in ("plan-report", "gather-evidence", "write-section"):
         copytree(files("reportagent.skills").joinpath(skill),
                  case_dir / f"work/skills/{skill}", dirs_exist_ok=True)
     return create_deep_agent(

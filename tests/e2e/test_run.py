@@ -151,3 +151,19 @@ def test_failed_text_continues_and_png_reaches_model(tmp_path):
     block = generated.call_args_list[1].args[1][-1].content_blocks[0]
     assert block["type"] == "image" and block["mime_type"] == "image/png"
     assert base64.b64decode(block["base64"]) == (tmp_path / "sources/two/page-001.png").read_bytes()
+
+
+def test_plan_then_named_section(tmp_path, monkeypatch):
+    section = "01-hydrology"
+    outputs = {"/work/plan.md": f"## {section}\nDrainage. [guide.pdf, page 1]\n", f"/work/notes/{section}.md": "Evidence.", f"/work/sections/{section}.md": "# Hydrology"}
+    model = ScriptedModel(responses=[reply for path, text in outputs.items() for reply in (call("write_file", file_path=path, content=text), AIMessage(content="Saved."))])
+    monkeypatch.setattr(cli, "make_model", lambda: model)
+    for command in (["plan", str(tmp_path), "--max-tokens", "10"], ["run", str(tmp_path), "--max-tokens", "10", "--section", section]):
+        monkeypatch.setattr(sys, "argv", ["reportagent", *command])
+        cli.main()
+    assert {path: (tmp_path / path.lstrip("/")).read_text() for path in outputs} == outputs
+    logs = {p.stem.rsplit("-", 1)[1]: [json.loads(line) for line in p.read_text().splitlines()] for p in (tmp_path / "work/runs").glob("*.jsonl")}
+    assert set(logs) == {"plan", "gather", "write"} and logs["plan"][0]["content"] == "Plan the report requested in /commission.md."
+    for phase, folder in (("gather", "notes"), ("write", "sections")):
+        prompt = logs[phase][0]["content"]
+        assert section in prompt and f"## {section}" in prompt and "/work/plan.md" in prompt and f"/work/{folder}/{section}.md" in prompt

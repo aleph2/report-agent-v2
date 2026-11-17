@@ -19,14 +19,16 @@ GATHER_BUDGET_FRACTION = 0.6
 def main():
     parser = argparse.ArgumentParser(prog="reportagent")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("ingest", "export", "run"):
+    for name in ("ingest", "export", "plan", "run"):
         command = commands.add_parser(name)
         command.add_argument("case", type=Path)
-        if name == "run":
+        if name in ("plan", "run"):
             command.add_argument("--max-tokens", type=int, required=True)
+        if name == "run":
             command.add_argument("--write-only", action="store_true")
+            command.add_argument("--section")
     args = parser.parse_args()
-    if args.command != "run":
+    if args.command in ("ingest", "export"):
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
     model = make_model()
@@ -34,12 +36,26 @@ def main():
     total = 0
     folder = args.case / "work/runs"
     folder.mkdir(parents=True, exist_ok=True)
-    for phase, prompt in (
-        ("gather", "Gather evidence for the section requested in /commission.md."),
-        ("write", "Write the section requested in /commission.md from the notes in /work/notes/."),
-    ):
+    if args.command == "plan":
+        phases = (("plan", "Plan the report requested in /commission.md."),)
+    elif args.section:
+        name = args.section
+        requirements = f"Its required contents are under heading ## {name} in /work/plan.md."
+        phases = (
+            ("gather", f"Gather evidence for section {name} requested in /commission.md. "
+             f"{requirements} Save evidence notes to /work/notes/{name}.md."),
+            ("write", f"Write section {name} requested in /commission.md. {requirements} "
+             f"Use the evidence notes in /work/notes/{name}.md. "
+             f"Save the section to /work/sections/{name}.md."),
+        )
+    else:
+        phases = (
+            ("gather", "Gather evidence for the section requested in /commission.md."),
+            ("write", "Write the section requested in /commission.md from the notes in /work/notes/."),
+        )
+    for phase, prompt in phases:
         gathering = phase == "gather"
-        if args.write_only and gathering:
+        if gathering and args.write_only:
             continue
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
         cap = TokenCapMiddleware(limit, remind=gathering)
