@@ -27,9 +27,11 @@ cp .env.example .env
 ```
 
 Edit `.env` to set `MODEL_NAME`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY`.
-The template selects Bailian's `qwen-plus` through its OpenAI-compatible Beijing
-pay-as-you-go endpoint. Set your Bailian API key in `OPENAI_API_KEY`; the key must
-match the endpoint's region and billing plan. See the
+The template selects DeepSeek `deepseek-v4.1-flash-1017` on Bailian through its
+OpenAI-compatible Beijing workspace endpoint. Replace `YOUR_WORKSPACE_ID` with
+your workspace ID, or copy your complete endpoint from the Bailian console.
+Set your Bailian API key in `OPENAI_API_KEY`; the key must match the endpoint's
+region and billing plan. See the
 [Model Studio endpoint documentation](https://help.aliyun.com/en/model-studio/base-url).
 Set `TAVILY_API_KEY` for web search and `LANGSMITH_API_KEY` for the local server.
 The local `.env` file is ignored by Git.
@@ -85,8 +87,8 @@ This provides a user-friendly chat interface and visualization of files in state
 Both the server entrypoint and notebook use the model defined by `.env`:
 
 ```dotenv
-MODEL_NAME=qwen-plus
-OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+MODEL_NAME=deepseek-v4.1-flash-1017
+OPENAI_BASE_URL=https://YOUR_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 OPENAI_API_KEY=your_bailian_api_key
 ```
 
@@ -109,5 +111,5 @@ The deep research agent adds the following custom tools beyond the built-in deep
 
 | Tool Name | Description |
 |-----------|-------------|
-| `tavily_search` | Web search tool that uses Tavily purely as a URL discovery engine. Performs searches using Tavily API to find relevant URLs, fetches full webpage content via HTTP with proper User-Agent headers (avoiding 403 errors), converts HTML to markdown, and returns the complete content without summarization to preserve all information for the agent's analysis. Works with both Claude and Gemini models. |
+| `tavily_search` | Web search tool that uses Tavily purely as a URL discovery engine. Performs searches using Tavily API to find relevant URLs, fetches full webpage content via HTTP with proper User-Agent headers (avoiding 403 errors), converts HTML to markdown, and returns the complete content without summarization to preserve all information for the agent's analysis. The configured model chooses when to use this tool. |
 | `think_tool` | Strategic reflection mechanism that helps the agent pause and assess progress between searches, analyze findings, identify gaps, and plan next steps. |
