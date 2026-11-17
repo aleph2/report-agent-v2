@@ -18,13 +18,13 @@ def test_token_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(ScriptedModel, "bind_tools", bind)
     model = ScriptedModel(responses=[
         call("read_file", file_path="/commission.md").model_copy(update={"usage_metadata": dict(input_tokens=6, output_tokens=1, total_tokens=7)}),
-        call("write_file", file_path="/work/sections/unused.md", content="unused").model_copy(update={"usage_metadata": dict(input_tokens=7, output_tokens=1, total_tokens=8)}),
+        call("write_file", file_path="/work/sections/at-cap.md", content="Saved at cap.").model_copy(update={"usage_metadata": dict(input_tokens=7, output_tokens=1, total_tokens=8)}),
         AIMessage(content="This response must remain unused."),
     ])
     result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(10), ModelCallLimitMiddleware(run_limit=200)]).invoke({"messages": [("user", "Write the section.")]})
     assert model.i == 2 and result["total_tokens"] == 15
     assert "cap" in result["messages"][-1].text.lower() and "10" in result["messages"][-1].text and "15" in result["messages"][-1].text
-    assert not (tmp_path / "work/sections/unused.md").exists()
+    assert (tmp_path / "work/sections/at-cap.md").read_text() == "Saved at cap."
 
 
 @pytest.mark.parametrize("cap", [0, -1])
