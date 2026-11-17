@@ -13,3 +13,4 @@ After each fact, cite the source file and page recorded in the notes, such as [o
 Carry every MISSING item from the notes into a final "缺失与待补充事项" list.
 State missing evidence or uncertainty plainly; do not invent facts.
 After saving the section, reply in one line with its path.
+If a page's text is empty, jumbled or a table you cannot follow, read its page image.

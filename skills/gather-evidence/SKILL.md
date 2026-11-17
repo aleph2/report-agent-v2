@@ -12,3 +12,4 @@ Save evidence notes to /work/notes/[section].md: one fact per line with its sour
 For each required item without supporting evidence, write a MISSING: line describing what is missing.
 State missing evidence or uncertainty plainly; do not invent facts.
 Stop when each required item has evidence or a MISSING line.
+If a page's text is empty, jumbled or a table you cannot follow, read its page image.

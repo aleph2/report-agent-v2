@@ -1,8 +1,13 @@
+import base64
 import json
 from pathlib import Path
 from shutil import copyfile
 import sys
 from types import SimpleNamespace
+from unittest.mock import patch
+
+from PIL import Image
+import pypdfium2 as pdfium
 
 from docx import Document
 from langchain_core.messages import AIMessage
@@ -40,7 +45,9 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     for args in (("ingest", str(tmp_path)), ("run", str(tmp_path), "--max-tokens", str(cap))):
         monkeypatch.setattr(sys, "argv", ["reportagent", *args])
         cli.main()
-    assert (tmp_path / "sources/index.md").read_text() == "# Sources\n\n## one-page.pdf\n\nPages: 1\n\nPage paths: sources/one-page/page-001.txt ... page-001.txt\n\n"
+    assert (tmp_path / "sources/index.md").read_text() == "# Sources\n\n## one-page.pdf\n\nPages: 1\n\nPage paths: sources/one-page/page-001.txt ... page-001.txt\nPage images: sources/one-page/page-001.png ... page-001.png\n\n"
+    with Image.open(tmp_path / "sources/one-page/page-001.png") as image:
+        assert image.format == "PNG" and max(image.size) == 1600
     assert len(made) == 1 and limits == [int(cap * 0.6), max(0, cap - gathered)]
     if len(gather_costs) > 1:
         assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
@@ -129,3 +136,18 @@ def test_cli_call_limit_and_missing_usage(tmp_path, monkeypatch):
         transcript = [json.loads(line) for line in log.read_text().splitlines()]
         assert "200" in transcript[-1]["content"] and "missing" in transcript[-1]["content"].lower()
         assert sum((message.get("usage_metadata") or {}).get("total_tokens", 0) for message in transcript) == 0
+
+
+def test_failed_text_continues_and_png_reaches_model(tmp_path):
+    (tmp_path / "sources").mkdir()
+    with pdfium.PdfDocument.new() as pdf:
+        for _ in range(2): pdf.new_page(300, 200).close()
+        pdf.save(tmp_path / "sources/two.pdf")
+    with patch("pdfplumber.page.Page.extract_text", side_effect=[RuntimeError("broken\ntext"), "Second page"]):
+        cli.ingest(tmp_path)
+    assert [(tmp_path / f"sources/two/page-{n:03d}.txt").read_text() for n in (1, 2)] == ["Text extraction failed: broken text. See page-001.png.", "Second page"]
+    with patch.object(ScriptedModel, "_generate", autospec=True, side_effect=ScriptedModel._generate) as generated:
+        cli.build_agent(tmp_path, ScriptedModel(responses=[call("read_file", file_path="/sources/two/page-001.png"), AIMessage(content="Done.")])).invoke({"messages": [{"role": "user", "content": "Read the failed page image."}]})
+    block = generated.call_args_list[1].args[1][-1].content_blocks[0]
+    assert block["type"] == "image" and block["mime_type"] == "image/png"
+    assert base64.b64decode(block["base64"]) == (tmp_path / "sources/two/page-001.png").read_bytes()
