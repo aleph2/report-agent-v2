@@ -1,12 +1,13 @@
 from typing import NotRequired
 
 from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 
 class TokenCapState(AgentState):
     total_tokens: NotRequired[int]
     usage_missing: NotRequired[bool]
+    budget_note_sent: NotRequired[bool]
 
 
 class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
@@ -26,6 +27,12 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         total = state.get("total_tokens", 0)
         if total >= self.max_tokens:
             return self._end(total)
+        # Keep pending tool calls and their results together before adding the note.
+        if total >= self.max_tokens / 2 and not state.get("budget_note_sent"):
+            return {"budget_note_sent": True, "messages": [HumanMessage(
+                content=f"You have used {total} of {self.max_tokens} tokens. Write the section now from what you have; "
+                        "mark anything missing as missing."
+            )]}
 
     @hook_config(can_jump_to=["end"])
     def after_model(self, state, runtime):
