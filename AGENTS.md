@@ -11,9 +11,9 @@ An agent system that writes an assessment report from supplied source documents 
 1. **Code must not judge.** No check on report content, on evidence, or on who may act.
 2. **Agents are intelligent.** Give them information and let them decide. Return a missing or odd value to the agent as data. Do not refuse it.
 3. **Borrow before building.** Use the framework first, then an open-source project, then v1 code. Write new code last.
-4. **Three stores.** All working data is a file, a to-do item or an assertion. The plan is a view of the to-do items.
+4. **Plain-text handoff.** Agents exchange plain-text files (notes, sections), not structured data; no stores or schemas between phases. Evidence notes pass research into a fresh drafting phase; gathering and writing are fixed phases.
 5. **Small tool surface.** Report know-how goes into skill files, not tools or prompts in code.
-6. **Human input is data.** Answers and approvals are saved as assertions. Code never tests whether an approval exists.
+6. **Human input is data.** Answers and approvals are saved as plain-text files. Code never tests whether an approval exists.
 7. **One live variant.** No version numbers for prompts, schemas or interfaces. No backward compatibility. Git holds history.
 8. **End to end first.** Every change is shown to work by an end-to-end run.
 9. **A failed run is answered with information first:** a sentence in a skill, then a clearer tool description or result, then code. A new check in code is last and needs the owner's decision.

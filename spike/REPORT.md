@@ -15,6 +15,8 @@ Python 3.12.14, with the five versions pinned in [pyproject.toml](../pyproject.t
 
 ## What changes for the design
 
+Current application design uses plain-text evidence notes and section files, passed between fixed gather-then-write phases. The capability checks above are historical probes, not application stores or a to-do workflow.
+
 - Treat the built-in to-do tool as profile-dependent. The pinned release explicitly adds `TodoListMiddleware` in its [OpenAI Codex profile](https://github.com/langchain-ai/deepagents/blob/bb49cf50d3450a3bbebe8d25240cb7ef6379bd0d/libs/deepagents/deepagents/profiles/harness/_openai_codex.py). The generic agent in this probe has no default planning tool. The end-to-end test records the model stating a plan in its message, making one successful file write, and finishing.
 - Qualify the design's LiteLLM licence entry. The core is MIT and the enterprise directory has separate terms. MinerU also has commercial thresholds and an attribution condition. See the [licence inventory](LICENCES.md).
 - The [copied example](deep_research/agent.py) includes web-research tools. After the initial ground check, its model selection was adapted to read `.env`, and the notebook now reuses that model. The [offline tests](../tests/e2e/test_hello.py) cover the original scripted framework flow and the example entrypoint with scripted OpenAI-compatible HTTP responses. The configured Bailian model was checked separately below; the full web-research workflow remains unverified.
