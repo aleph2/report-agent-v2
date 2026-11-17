@@ -44,7 +44,7 @@ def test_half_budget_note_preserves_pending_tools(tmp_path):
     result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(10)]).invoke({"messages": [("user", "Write the section.")]})
     notes = [(i, m) for i, m in enumerate(result["messages"]) if isinstance(m, HumanMessage) and m.text.startswith("You have used")]
     assert len(notes) == 1 and notes[0][0] == 5
-    assert notes[0][1].text == "You have used 7 of 10 tokens. Write the section now from what you have; mark anything missing as missing."
+    assert notes[0][1].text == "You have used 7 of 10 tokens. Write your evidence notes now from what you have; mark anything missing as missing."
     pending = result["messages"][notes[0][0] - 1]
     assert pending.type == "tool" and pending.tool_call_id == "write_file" and pending.status == "success"
     assert (tmp_path / "pending.txt").read_text() == "Tool executed."

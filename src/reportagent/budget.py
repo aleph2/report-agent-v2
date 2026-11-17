@@ -13,8 +13,9 @@ class TokenCapState(AgentState):
 class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
     state_schema = TokenCapState
 
-    def __init__(self, max_tokens):
+    def __init__(self, max_tokens, *, remind=True):
         self.max_tokens = max_tokens
+        self.remind = remind
 
     def _end(self, total):
         return {"total_tokens": total, "jump_to": "end", "messages": [
@@ -27,9 +28,9 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         if total >= self.max_tokens:
             return self._end(total)
         # Keep pending tool calls and their results together before adding the note.
-        if total >= self.max_tokens / 2 and not state.get("budget_note_sent"):
+        if self.remind and total >= self.max_tokens / 2 and not state.get("budget_note_sent"):
             return {"budget_note_sent": True, "messages": [HumanMessage(
-                content=f"You have used {total} of {self.max_tokens} tokens. Write the section now from what you have; "
+                content=f"You have used {total} of {self.max_tokens} tokens. Write your evidence notes now from what you have; "
                         "mark anything missing as missing."
             )]}
 

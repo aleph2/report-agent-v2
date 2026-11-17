@@ -26,17 +26,27 @@ def main():
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
     model = make_model()
-    cap = TokenCapMiddleware(args.max_tokens)
-    calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
-    state = {"messages": [HumanMessage(content="Write the report requested in /commission.md.")]}
+    remaining = args.max_tokens
+    total = 0
     folder = args.case / "work/runs"
     folder.mkdir(parents=True, exist_ok=True)
-    log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + ".jsonl")
-    try:
-        agent = build_agent(args.case, model, middleware=[cap, calls])
-        for state in agent.stream(state, stream_mode="values"):
-            pass
-    finally:
-        log.write_text("".join(message.model_dump_json() + "\n" for message in state["messages"]), encoding="utf-8")
-        print(f"Reported tokens: {state.get('total_tokens', 0)}")
-        print("Run ended:", "error" if sys.exception() else state["messages"][-1].text)
+    for phase, prompt in (
+        ("gather", "Gather evidence for the section requested in /commission.md."),
+        ("write", "Write the section requested in /commission.md from the notes in /work/notes/."),
+    ):
+        cap = TokenCapMiddleware(remaining, remind=phase == "gather")
+        calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
+        state = {"messages": [HumanMessage(content=prompt)]}
+        log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
+        try:
+            agent = build_agent(args.case, model, middleware=[cap, calls])
+            for state in agent.stream(state, stream_mode="values"):
+                pass
+        finally:
+            log.write_text("".join(message.model_dump_json() + "\n" for message in state["messages"]), encoding="utf-8")
+            used = state.get("total_tokens", 0)
+            total += used
+            remaining = max(0, remaining - used)
+            print(f"{phase} phase tokens: {used}")
+            print(f"Reported tokens: {total}")
+            print("Run ended:", "error" if sys.exception() else state["messages"][-1].text)

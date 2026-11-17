@@ -24,4 +24,4 @@ packages = ["reportagent", "reportagent.export", "reportagent.skills"]
 "reportagent.skills" = "skills"
 
 [tool.setuptools.package-data]
-"reportagent.skills" = ["write-section/SKILL.md"]
+"reportagent.skills" = ["gather-evidence/SKILL.md", "write-section/SKILL.md"]
