@@ -2,7 +2,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_core.messages import AIMessage, ToolMessage
 
-from fake_tool_calls import ScriptedModel, call
+from tests.fake_model import ScriptedModel, call
 
 
 def test_hello(tmp_path):
