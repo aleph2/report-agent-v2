@@ -58,3 +58,66 @@ were not run; `TAVILY_API_KEY` remains unset. The scripted offline tests remain
 independent of live credentials.
 
 Provider reference: [DeepSeek API documentation](https://help.aliyun.com/en/model-studio/deepseek-api).
+
+## Task 11 — image input and local PDF extraction, 2026-11-17
+
+Probe only: application source, skills, dependencies and case files are unchanged.
+The [probe script](task11_probe.py) keeps outputs outside Git. One configured-model
+request accepted a synthetic 64×64 PNG and correctly read its number: 193 input
+and 11 output tokens (204 total), below the authorized 2,000-token cap. Output was
+limited to 128 tokens; retries and thinking were disabled. This checks image
+transport and one trivial reading, not engineering-drawing competence.
+
+Docling 2.150.1 ran in an isolated CPU environment (PyTorch 2.15.0+cpu,
+Transformers 5.23.0), with Heron layout and TableFormer V1 accurate, OCR off,
+table cell matching on, two model threads and two parser threads. Weights were
+prefetched; each physical PDF page ran in a separate process with networking
+disabled. Time includes imports, model loading, conversion and exports, excludes
+downloads; memory is Linux process peak RSS. These are single measurements,
+with filesystem caches shared between processes, not throughput benchmarks.
+
+| Physical page | Seconds | Peak RSS (GiB) | Compared with the original render and current page text |
+| --- | ---: | ---: | --- |
+| 10 | 5.449 | 1.218 | Separates the two columns; current text interleaves them. |
+| 95 | 47.234 | 1.954 | Detects rows, but 20 columns instead of 21; damages headers and merges adjacent cells in several populated rows. |
+| 96 | 13.253 | 1.338 | Eight columns; all six populated rows retain the checked location, length, height, geology, scheme and remark associations. Header/unit rows still need interpretation. |
+| 97 | 34.035 | 1.665 | Fifteen columns instead of 14; splits one descriptive field into two, including duplicated cells. Checked numeric rows and totals remain in their corresponding numeric fields. |
+| 98 | 8.331 | 1.508 | No table detected; Markdown is only an image placeholder. JSON retains 95 text items inside that picture, without a table grid; current page text also retains its labels and values. |
+| 99 | 6.538 | 1.524 | Separates numbered prose from the diagram in Markdown, omitting picture-contained labels there; no data table detected. JSON retains additional text items. |
+
+Inspection covered Markdown, CSV, HTML and JSON against page images, not an
+exhaustive character-level accuracy score. The structural errors on pages 95
+and 97 also occur in JSON/HTML; they are not merely Markdown's documented
+flattening of merged cells. Docling improves column order but is not a reliable
+replacement for the current extractor on this sample. No parser was replaced.
+
+The earlier survey failure record says 59 pages completed, then physical page
+60 raised `Invalid octal`. pypdfium2 5.15.2 read and rendered both pages offline:
+page 59 took 0.213 s / 0.062 GiB; page 60 took 5.286 s / 0.117 GiB. Page 60 is
+raster content with zero native text; successful rendering does not recover its
+meaning or establish that the full PDF can be ingested. Docling was not needed
+for this alternative-reader check; OCR and map interpretation were not tested.
+
+One initial offline Docling setup failed to locate the locally downloaded
+weights; setting the documented `artifacts_path` resolved it. That failed setup
+and the local image-size preflight are preserved privately; neither sent a
+provider request. The single paid authorization is consumed; no retry or other
+model was called. Licence identifiers and exact used weight revisions are in
+[LICENCES.md](LICENCES.md). Selected raw extracts are sent privately for review;
+case text, PDFs, model weights, credentials and probe outputs are excluded here.
+
+To reproduce an offline page check after installing these versions and fetching
+the two weight sets into Docling's local model directory:
+
+```sh
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=2 python spike/task11_probe.py docling --pdf /path/to/input.pdf --page 10 --output /private/probe/page-010
+python spike/task11_probe.py pdfium --pdf /path/to/input.pdf --page 60 --output /private/probe/page-060
+```
+
+Run conversion with networking disabled; the offline flags alone are not network
+isolation. Inspect `result.json` for conversion status. Image mode makes a paid
+request and requires a fresh written authorization; do not rerun this consumed
+probe. References: [converter API](https://docling-project.github.io/docling/reference/document_converter/),
+[local artifacts and threads](https://docling-project.github.io/docling/usage/advanced_options/),
+[serialization limits](https://docling-project.github.io/docling/concepts/serialization/),
+[provider image API](https://help.aliyun.com/zh/model-studio/deepseek-api).

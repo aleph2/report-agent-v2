@@ -1,6 +1,6 @@
 # Third-party licences
 
-The links identify the licence texts reviewed for milestone 0. Only the DeepAgents example is copied into this repository.
+The links identify the licence texts reviewed for milestone 0 and the isolated Task 11 probe. Only the DeepAgents example is copied into this repository; no model weights are redistributed here.
 
 | Project | Licence | Licence file |
 | --- | --- | --- |
@@ -9,7 +9,9 @@ The links identify the licence texts reviewed for milestone 0. Only the DeepAgen
 | LangGraph | MIT | [Licence](https://github.com/langchain-ai/langgraph/blob/49cce0ca852be4cfb567a1cbe0e511ff325a1682/LICENSE) |
 | open_deep_research | MIT | [Licence](https://github.com/langchain-ai/open_deep_research/blob/1b7d2e80db9faa586165c60e09096dbbfd483a64/LICENSE) |
 | GPT Researcher | Apache-2.0 | [Licence](https://github.com/assafelovic/gpt-researcher/blob/ddd4db36208d9c8e49f3b2436efda97baecb5433/LICENSE) |
-| Docling | MIT | [Licence](https://github.com/docling-project/docling/blob/e16c4b71a7b7d9154ffca164accad2581aed5c9f/LICENSE) |
+| Docling 2.150.1 code | MIT | [Licence](https://github.com/docling-project/docling/blob/v2.150.1/LICENSE) |
+| Docling Heron layout weights, `8f39ad3c0b4c58e9c2d2c84a38465abf757272d8` | Apache-2.0 | [Pinned model card](https://huggingface.co/docling-project/docling-layout-heron/blob/8f39ad3c0b4c58e9c2d2c84a38465abf757272d8/README.md), [terms](https://www.apache.org/licenses/LICENSE-2.0) |
+| Docling TableFormer V1 accurate weights, `v2.3.0` / `fc0f2d45e2218ea24bce5045f58a389aed16dc23` | CDLA-Permissive-2.0 | [Pinned model card](https://huggingface.co/docling-project/docling-models/blob/fc0f2d45e2218ea24bce5045f58a389aed16dc23/README.md), [terms](https://cdla.dev/permissive-2-0/) |
 | MinerU | MinerU Open Source License (Apache-2.0 with additional terms) | [Licence](https://github.com/opendatalab/MinerU/blob/b4efa4b2b76ebb012c476b79bdfc6f18a95aacd6/LICENSE.md) |
 | LiteLLM | MIT for core. BerriAI Enterprise License for the enterprise directory. | [Licence](https://github.com/BerriAI/litellm/blob/4af6fb70d80531b97ac5082b858ed9dbbd503066/LICENSE), [Enterprise](https://github.com/BerriAI/litellm/blob/4af6fb70d80531b97ac5082b858ed9dbbd503066/litellm/enterprise/LICENSE.md) |
 | GEPA | MIT | [Licence](https://github.com/gepa-ai/gepa/blob/ce5b0d6e3d6af6c6dbec6de2c54536bbb961d309/LICENSE) |
@@ -19,6 +21,10 @@ The links identify the licence texts reviewed for milestone 0. Only the DeepAgen
 | pypdfium2 | Apache-2.0 OR BSD-3-Clause for the binding. CC-BY-4.0 for documentation and examples. | [Apache-2.0](https://github.com/pypdfium2-team/pypdfium2/blob/ee2be5c705e2cf86c51ffd8b884e6fd99906a931/LICENSES/Apache-2.0.txt), [BSD-3-Clause](https://github.com/pypdfium2-team/pypdfium2/blob/ee2be5c705e2cf86c51ffd8b884e6fd99906a931/LICENSES/BSD-3-Clause.txt), [CC-BY-4.0](https://github.com/pypdfium2-team/pypdfium2/blob/ee2be5c705e2cf86c51ffd8b884e6fd99906a931/LICENSES/CC-BY-4.0.txt) |
 
 MinerU requires a separate commercial licence when the user and its affiliates together exceed 100 million monthly active users or USD 20 million in monthly revenue. It also requires prominent attribution for online services provided to third parties. LiteLLM enterprise production use requires an enterprise licence. PDFium binary distributions carry additional notices for the bundled dependencies. [PDFium build notices](https://github.com/pypdfium2-team/pypdfium2/tree/ee2be5c705e2cf86c51ffd8b884e6fd99906a931/BUILD_LICENSES)
+
+## Task 11 model scope
+
+The CPU probe used Heron for layout and TableFormer V1 accurate for table structure; OCR and other enrichment models were disabled. The Docling code licence does not cover its weights. The actual TableFormer revision used here declares CDLA-Permissive-2.0, even though the repository's newer main model card offers a different licence choice. CDLA section 2 requires the licence text when sharing the weights; section 3 imposes no restrictions or obligations on computational results. Preserve applicable Apache notices when redistributing Heron. This is an inventory of the code and two used weight sets, not an audit of every transitive package.
 
 ## Notice for the copied DeepAgents example
 
