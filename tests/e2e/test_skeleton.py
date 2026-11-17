@@ -18,7 +18,7 @@ def test_skeleton(tmp_path):
     sentence = "The site drains toward the eastern channel."
     ingest(case)
     assert sentence in (case / "sources/one-page/page-001.txt").read_text()
-    assert "sources/one-page/page-001.txt" in (case / "sources/index.md").read_text()
+    assert (case / "sources/index.md").read_text() == "# Sources\n\n## one-page.pdf\n\nPages: 1\n\nPage paths: sources/one-page/page-001.txt ... page-001.txt\n\n"
     section = f"# Hydrology\n\n## Drainage\n\n### Direction\n\n{sentence} [one-page.pdf, page 1]"
     model = ScriptedModel(responses=[
         call("read_file", file_path="/commission.md"),

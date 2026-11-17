@@ -13,12 +13,12 @@ def ingest(case_dir):
         pages = sources / source.stem
         pages.mkdir(exist_ok=True)
         with pdfplumber.open(source) as pdf:
-            index.append(f"## {source.name}\n\nPages: {len(pdf.pages)}\n")
+            index.append(f"## {source.name}\n\nPages: {len(pdf.pages)}\n\n"
+                         f"Page paths: {pages.relative_to(case_dir).as_posix()}/page-001.txt ... page-{len(pdf.pages):03d}.txt\n")
             for number, page in enumerate(pdf.pages, 1):
                 target = pages / f"page-{number:03d}.txt"
                 target.write_text(page.extract_text() or "", encoding="utf-8")
                 page.close()
-                index.append(f"- {target.relative_to(case_dir).as_posix()}")
     target = sources / "index.md"
     target.write_text("\n".join(index) + "\n", encoding="utf-8")
     return target
