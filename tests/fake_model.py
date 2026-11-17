@@ -1,3 +1,6 @@
+from deepagents import register_harness_profile
+from reportagent.models import RUN_PROFILE
+
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 
@@ -10,3 +13,6 @@ class ScriptedModel(FakeMessagesListChatModel):
 
 def call(name, **args):
     return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": name}])
+
+
+register_harness_profile("scriptedmodel", RUN_PROFILE)
