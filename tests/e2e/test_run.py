@@ -19,7 +19,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     copyfile(Path(__file__).parents[1] / "fixtures/one-page.pdf", tmp_path / "sources/one-page.pdf")
     sentence = "The site drains toward the eastern channel."
     notes = f"{sentence} [one-page.pdf, page 1]\nMISSING: Drainage dimensions."
-    section = f"# Hydrology\n\n{sentence} [one-page.pdf, page 1]\n\n## 缺失与待补充事项\n\nDrainage dimensions."
+    section = f"# Hydrology\n\n## Drainage\n\n### Direction\n\n{sentence} [one-page.pdf, page 1]\n\n## 缺失与待补充事项\n\nDrainage dimensions."
     gather = [call("read_file", file_path="/sources/one-page/page-001.txt"),
               call("write_file", file_path="/work/notes/hydrology.md", content=notes), AIMessage(content="Evidence saved.")]
     replies = [call("read_file", file_path="/work/notes/hydrology.md"),
@@ -40,12 +40,15 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     for args in (("ingest", str(tmp_path)), ("run", str(tmp_path), "--max-tokens", str(cap))):
         monkeypatch.setattr(sys, "argv", ["reportagent", *args])
         cli.main()
+    assert (tmp_path / "sources/index.md").read_text() == "# Sources\n\n## one-page.pdf\n\nPages: 1\n\nPage paths: sources/one-page/page-001.txt ... page-001.txt\n\n"
     assert len(made) == 1 and limits == [int(cap * 0.6), max(0, cap - gathered)]
     if len(gather_costs) > 1:
         assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
     logs = sorted((tmp_path / "work/runs").glob("*.jsonl"))
     assert len(logs) == 2
     research, draft = [[json.loads(line) for line in log.read_text().splitlines()] for log in logs]
+    assert sentence in research[2]["content"]
+    assert all(m["status"] == "success" for log in (research, draft) for m in log if m["type"] == "tool")
     assert research[0]["content"] == "Gather evidence for the section requested in /commission.md."
     assert draft[0]["content"] == "Write the section requested in /commission.md from the notes in /work/notes/."
     assert [m["content"] for m in draft if m["type"] == "human"] == [draft[0]["content"]]
@@ -56,7 +59,9 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
         assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
         monkeypatch.setattr(sys, "argv", ["reportagent", "export", str(tmp_path)])
         cli.main()
-        assert sentence in "\n".join(p.text for p in Document(tmp_path / "out/report.docx").paragraphs)
+        paragraphs = Document(tmp_path / "out/report.docx").paragraphs
+        assert [(p.text, p.style.name) for p in paragraphs[:3]] == [("Hydrology", "Heading 1"), ("Drainage", "Heading 2"), ("Direction", "Heading 3")]
+        assert sentence in "\n".join(p.text for p in paragraphs)
     else:
         assert len(draft) == 2 and "cap=0" in draft[-1]["content"]
         assert not (tmp_path / "work/sections").exists()
