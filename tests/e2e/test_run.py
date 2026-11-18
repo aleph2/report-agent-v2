@@ -51,19 +51,22 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     assert (tmp_path / "index.md").read_text() == "# Case files\n\n## commission/brief.md\n\nText: commission/brief.md.files/text.md\n\n## sources/one-page.pdf\n\nPages: 1\n\nPage paths: sources/one-page/page-001.txt ... page-001.txt\nPage images: sources/one-page/page-001.png ... page-001.png\n\n"
     with Image.open(tmp_path / "sources/one-page/page-001.png") as image:
         assert image.format == "PNG" and max(image.size) == 1600
-    assert len(made) == 1 and limits == [int(cap * 0.6), max(0, cap - gathered)]
+    assert len(made) == 1 and limits == [int(cap * 0.6)] + ([max(0, cap - gathered)] if written else [])
     if len(gather_costs) > 1:
         assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
     logs = sorted((tmp_path / "work/runs").glob("*.jsonl"))
-    assert len(logs) == 2
-    research, draft = [[json.loads(line) for line in log.read_text().splitlines()] for log in logs]
+    assert len(logs) == (2 if written else 1)
+    research = [json.loads(line) for line in logs[0].read_text().splitlines()]
+    draft = [json.loads(line) for line in logs[1].read_text().splitlines()] if written else []
     assert sentence in research[2]["content"]
     assert all(m["status"] == "success" for log in (research, draft) for m in log if m["type"] == "tool")
     assert research[0]["content"] == "Gather evidence for the section requested in /commission/."
-    assert draft[0]["content"] == "Write the section requested in /commission/ from the notes in /work/notes/."
-    assert [m["content"] for m in draft if m["type"] == "human"] == [draft[0]["content"]]
+    if written:
+        assert draft[0]["content"] == "Write the section requested in /commission/ from the notes in /work/notes/."
+        assert [m["content"] for m in draft if m["type"] == "human"] == [draft[0]["content"]]
     assert [sum((m.get("usage_metadata") or {}).get("total_tokens", 0) for m in log) for log in (research, draft)] == [gathered, written]
-    assert f"Reported tokens: {gathered + written}" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert f"Reported tokens: {gathered + written}" in output
     if written:
         assert draft[1]["tool_calls"][0]["args"]["file_path"] == "/work/notes/hydrology.md" and notes in draft[2]["content"]
         assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
@@ -73,7 +76,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
         assert [(p.text, p.style.name) for p in paragraphs[:3]] == [("Hydrology", "Heading 1"), ("Drainage", "Heading 2"), ("Direction", "Heading 3")]
         assert sentence in "\n".join(p.text for p in paragraphs)
     else:
-        assert len(draft) == 2 and "cap=0" in draft[-1]["content"]
+        assert not draft and "No notes for requested section; writing skipped." in output
         assert not (tmp_path / "work/sections").exists()
 
 
@@ -136,7 +139,7 @@ def test_cli_call_limit_and_missing_usage(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "100000"])
     cli.main()
     logs = list((tmp_path / "work/runs").glob("*.jsonl"))
-    assert model.i == 400 and len(logs) == 2
+    assert model.i == 200 and len(logs) == 1
     for log in logs:
         transcript = [json.loads(line) for line in log.read_text().splitlines()]
         assert "200" in transcript[-1]["content"] and "missing" in transcript[-1]["content"].lower()
@@ -234,3 +237,16 @@ def test_plan_receives_half_budget_note(tmp_path, monkeypatch):
     notes = [m for m in messages if m["type"] == "human" and m["content"].startswith("You have used")]
     assert len(notes) == 1 and notes[0]["content"].startswith("You have used 5 of 10 tokens.")
     assert messages[messages.index(notes[0]) - 1]["type"] == "tool" and (tmp_path / "work/plan.md").read_text() == plan
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_named_run_requires_notes_file(tmp_path, monkeypatch, capsys, matching):
+    notes = tmp_path / "work/notes"; notes.mkdir(parents=True)
+    (notes / ("02-synthetic.md" if matching else "01-other.md")).touch()
+    model = ScriptedModel(responses=[AIMessage(content="Done.") for _ in range(3)])
+    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--section", "02-synthetic", "--max-tokens", "100"])
+    cli.main()
+    assert model.i == (2 if matching else 1)
+    assert len(list((tmp_path / "work/runs").glob("*.jsonl"))) == (2 if matching else 1)
+    assert ("No notes for 02-synthetic; writing skipped." in capsys.readouterr().out) is (not matching)

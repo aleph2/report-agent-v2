@@ -57,6 +57,12 @@ def main():
         gathering = phase == "gather"
         if gathering and args.write_only:
             continue
+        if phase == "write" and not args.write_only:
+            notes = args.case / "work/notes"
+            notes_files = [notes / f"{args.section}.md"] if args.section else notes.glob("*.md")
+            if not any(path.is_file() for path in notes_files):
+                print(f"No notes for {args.section or 'requested section'}; writing skipped.")
+                continue
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
         cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather"))
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
