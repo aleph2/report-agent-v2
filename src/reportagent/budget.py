@@ -30,7 +30,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         # Keep pending tool calls and their results together before adding the note.
         if self.remind and total >= self.max_tokens / 2 and not state.get("budget_note_sent"):
             return {"budget_note_sent": True, "messages": [HumanMessage(
-                content=f"You have used {total} of {self.max_tokens} tokens. Write your evidence notes now from what you have; "
+                content=f"You have used {total} of {self.max_tokens} tokens. Save your work now from what you have; "
                         "mark anything missing as missing."
             )]}
 
