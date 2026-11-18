@@ -42,27 +42,36 @@ def test_half_budget_note_preserves_pending_tools(tmp_path):
                call("write_file", file_path="/pending.txt", content="Tool executed."),
                call("read_file", file_path="/pending.txt"), AIMessage(content="Done.")]
     model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=tokens, output_tokens=0, total_tokens=tokens)})
-                                     for reply, tokens in zip(replies, [4, 3, 1, 1])])
-    result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(10)]).invoke({"messages": [("user", "Write the section.")]})
+                                     for reply, tokens in zip(replies, [4, 2, 1, 1])])
+    result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(12)]).invoke({"messages": [("user", "Write the section.")]})
     notes = [(i, m) for i, m in enumerate(result["messages"]) if isinstance(m, HumanMessage) and m.text.startswith("You have used")]
     assert len(notes) == 1 and notes[0][0] == 5
-    assert notes[0][1].text == "You have used 7 of 10 tokens. Save your work now from what you have; mark anything missing as missing."
+    assert notes[0][1].text == "You have used 6 of 12 tokens. Save your work now from what you have; mark anything missing as missing."
     pending = result["messages"][notes[0][0] - 1]
     assert pending.type == "tool" and pending.tool_call_id == "write_file" and pending.status == "success"
     assert (tmp_path / "pending.txt").read_text() == "Tool executed."
-    assert sum(isinstance(m, AIMessage) for m in result["messages"]) == 4 and result["total_tokens"] == 9 and result["budget_note_sent"]
+    assert sum(isinstance(m, AIMessage) for m in result["messages"]) == 4 and result["total_tokens"] == 8 and result["budget_note_sent"]
 
 
-@pytest.mark.parametrize("costs,limit,calls,used,rule", [
-    ([3, 6, 12], 10, 2, 9, "previous call"),
-    ([2, 2, 2], 6, 3, 6, "reported total >= cap"),
-    ([12, 3, 3], 10, 1, 12, "reported total >= cap"),
-    ([None, 6, 12], 10, 2, 6, "previous call"),
+@pytest.mark.parametrize("costs,limit,calls,used,saved,writing", [
+    ([2, 3, 4], 10, 3, 9, True, True),
+    ([2, 2, 2], 6, 3, 6, True, True),
+    ([12, 3, 3], 10, 1, 12, False, True),
+    ([None, 6, 3], 10, 3, 9, True, True),
+    ([3, 6, 12], 10, 3, 21, True, True),
+    ([2, 3, 4], 10, 3, 9, True, False),
 ])
-def test_stops_before_likely_crossing_call(tmp_path, costs, limit, calls, used, rule):
-    replies = [call("ls", path="/").model_copy(update={"usage_metadata":
-               dict(input_tokens=n, output_tokens=0, total_tokens=n) if n is not None else None}) for n in costs]
+def test_final_save_turn(tmp_path, costs, limit, calls, used, saved, writing):
+    replies = [call("ls", path="/"), call("ls", path="/"), call("write_file", file_path="/saved.md", content="Saved.") if writing else AIMessage(content="No tool call.")]
+    replies = [reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n) if n is not None else None}) for reply, n in zip(replies, costs)]
     model = ScriptedModel(responses=[*replies, AIMessage(content="Unused.")])
     result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(limit)]).invoke({"messages": [("user", "Read the case.")]})
     assert model.i == calls and result["total_tokens"] == used
-    assert rule in result["messages"][-1].text
+    notes = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.text == "Token budget reached. Save your work now in one write; do not read anything more."]
+    assert len(notes) == int(saved) and (tmp_path / "saved.md").exists() is (saved and writing)
+    if saved:
+        if writing:
+            assert (tmp_path / "saved.md").read_text() == "Saved." and result["messages"][-2].type == "tool" and result["messages"][-2].status == "success"
+        assert "2 * previous call" in result["messages"][-1].text
+    else:
+        assert "reported total >= cap" in result["messages"][-1].text

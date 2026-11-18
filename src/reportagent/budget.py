@@ -8,6 +8,7 @@ class TokenCapState(AgentState):
     total_tokens: NotRequired[int]
     usage_missing: NotRequired[bool]
     budget_note_sent: NotRequired[bool]
+    final_save_rule: NotRequired[str]
 
 
 class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
@@ -26,12 +27,16 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
     @hook_config(can_jump_to=["end"])
     def before_model(self, state, runtime):
         total = state.get("total_tokens", 0)
+        if state.get("final_save_rule"):
+            return {"jump_to": "end"}
         if total >= self.max_tokens:
             return self._end(total)
         previous = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
         last_tokens = ((previous.usage_metadata or {}).get("total_tokens") or 0) if previous else 0
-        if total + last_tokens > self.max_tokens:
-            return self._end(total, "reported total + previous call > cap")
+        if total + 2 * last_tokens > self.max_tokens:
+            return {"final_save_rule": "reported total + 2 * previous call > cap", "messages": [HumanMessage(
+                content="Token budget reached. Save your work now in one write; do not read anything more."
+            )]}
         # Keep pending tool calls and their results together before adding the note.
         if self.remind and total >= self.max_tokens / 2 and not state.get("budget_note_sent"):
             return {"budget_note_sent": True, "messages": [HumanMessage(
@@ -47,7 +52,10 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         return update
 
     def after_agent(self, state, runtime):
+        rule = state.get("final_save_rule")
+        reply = self._end(state.get("total_tokens", 0), rule)["messages"][0] if rule else state["messages"][-1]
         if state.get("usage_missing"):
-            reply = state["messages"][-1]
             text = reply.text + "\nUsage metadata was missing for some model calls; those calls counted as 0."
-            return {"messages": [reply.model_copy(update={"content": text})]}
+            reply = reply.model_copy(update={"content": text})
+        if rule or state.get("usage_missing"):
+            return {"messages": [reply]}

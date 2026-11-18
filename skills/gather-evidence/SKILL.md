@@ -8,6 +8,8 @@ If /work/plan.md exists, the section's required contents are under its heading t
 Read /index.md to find the source files and their page paths.
 The index gives each PDF's page range; do not list page folders.
 Use grep to find the pages you need, and read only those.
+To find a chapter in /reference/, first read its table-of-contents pages, then read only that chapter's pages.
+Search the page-NNN.txt files, not the PDFs.
 Read the guide or standard's list of required contents for the section.
 Use a guide or standard only for what the section must contain; take facts from the project documents.
 Do not take facts from /reference/.

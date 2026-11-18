@@ -63,7 +63,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     assert research[0]["content"] == "Gather evidence for the section requested in /commission/."
     if written:
         assert draft[0]["content"] == "Write the section requested in /commission/ from the notes in /work/notes/."
-        assert [m["content"] for m in draft if m["type"] == "human"] == [draft[0]["content"]]
+        assert [m["content"] for m in draft if m["type"] == "human"] == [draft[0]["content"]] + (["Token budget reached. Save your work now in one write; do not read anything more."] if written < 4 else [])
     assert [sum((m.get("usage_metadata") or {}).get("total_tokens", 0) for m in log) for log in (research, draft)] == [gathered, written]
     output = capsys.readouterr().out
     assert f"Reported tokens: {gathered + written}" in output
@@ -97,7 +97,7 @@ def test_cli_write_only(tmp_path, monkeypatch):
     assert len(logs) == 1 and logs[0].name.endswith("-write.jsonl")
     transcript = [json.loads(line) for line in logs[0].read_text().splitlines()]
     assert transcript[0]["content"] == "Write the section requested in /commission/ from the notes in /work/notes/."
-    assert notes in transcript[2]["content"] and transcript[-1]["content"] == "Done."
+    assert notes in transcript[2]["content"] and transcript[-2]["content"] == "Done." and "2 * previous call" in transcript[-1]["content"]
     assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
     assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
 
@@ -229,7 +229,7 @@ def test_plan_receives_half_budget_note(tmp_path, monkeypatch):
     (tmp_path / "commission/brief.md").write_text("Plan one synthetic section.")
     plan = "## 01-synthetic\nSynthetic guidance."
     replies = [call("read_file", file_path="/commission/brief.md"), call("write_file", file_path="/work/plan.md", content=plan), AIMessage(content="Saved.")]
-    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n)}) for reply, n in zip(replies, [5, 1, 1])])
+    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n)}) for reply, n in zip(replies, [3, 2, 1])])
     monkeypatch.setattr(cli, "make_model", lambda: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "plan", str(tmp_path), "--max-tokens", "10"])
     cli.main()
