@@ -3,6 +3,7 @@ name: gather-evidence
 description: Gather cited evidence and missing facts for the section requested in the commission.
 ---
 Read the files in /commission/ for this report's scope and rules.
+Ignore /work/runs/; it holds run logs, not evidence.
 If /work/plan.md exists, the section's required contents are under its heading there.
 Read /index.md to find the source files and their page paths.
 The index gives each PDF's page range; do not list page folders.

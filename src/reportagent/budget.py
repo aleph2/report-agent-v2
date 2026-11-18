@@ -17,9 +17,10 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         self.max_tokens = max_tokens
         self.remind = remind
 
-    def _end(self, total):
+    def _end(self, total, rule="reported total >= cap"):
         return {"total_tokens": total, "jump_to": "end", "messages": [
-            AIMessage(content=f"Token cap reached: cap={self.max_tokens}; reported total={total}."),
+            AIMessage(content=f"Token cap reached: cap={self.max_tokens}; reported total={total}. "
+                              f"Stop rule: {rule}."),
         ]}
 
     @hook_config(can_jump_to=["end"])
@@ -27,6 +28,10 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         total = state.get("total_tokens", 0)
         if total >= self.max_tokens:
             return self._end(total)
+        previous = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
+        last_tokens = ((previous.usage_metadata or {}).get("total_tokens") or 0) if previous else 0
+        if total + last_tokens > self.max_tokens:
+            return self._end(total, "reported total + previous call > cap")
         # Keep pending tool calls and their results together before adding the note.
         if self.remind and total >= self.max_tokens / 2 and not state.get("budget_note_sent"):
             return {"budget_note_sent": True, "messages": [HumanMessage(

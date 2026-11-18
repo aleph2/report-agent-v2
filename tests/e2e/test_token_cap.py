@@ -18,13 +18,13 @@ def test_token_cap(tmp_path, monkeypatch):
         return original(self, tools, **kwargs)
     monkeypatch.setattr(ScriptedModel, "bind_tools", bind)
     model = ScriptedModel(responses=[
-        call("read_file", file_path="/commission/brief.md").model_copy(update={"usage_metadata": dict(input_tokens=6, output_tokens=1, total_tokens=7)}),
-        call("write_file", file_path="/work/sections/at-cap.md", content="Saved at cap.").model_copy(update={"usage_metadata": dict(input_tokens=7, output_tokens=1, total_tokens=8)}),
+        call("read_file", file_path="/commission/brief.md").model_copy(update={"usage_metadata": dict(input_tokens=3, output_tokens=1, total_tokens=4)}),
+        call("write_file", file_path="/work/sections/at-cap.md", content="Saved at cap.").model_copy(update={"usage_metadata": dict(input_tokens=5, output_tokens=1, total_tokens=6)}),
         AIMessage(content="This response must remain unused."),
     ])
     result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(10), ModelCallLimitMiddleware(run_limit=200)]).invoke({"messages": [("user", "Write the section.")]})
-    assert model.i == 2 and result["total_tokens"] == 15
-    assert "cap" in result["messages"][-1].text.lower() and "10" in result["messages"][-1].text and "15" in result["messages"][-1].text
+    assert model.i == 2 and result["total_tokens"] == 10
+    assert "cap" in result["messages"][-1].text.lower() and "10" in result["messages"][-1].text and "reported total=10" in result["messages"][-1].text
     assert (tmp_path / "work/sections/at-cap.md").read_text() == "Saved at cap."
 
 
@@ -51,3 +51,18 @@ def test_half_budget_note_preserves_pending_tools(tmp_path):
     assert pending.type == "tool" and pending.tool_call_id == "write_file" and pending.status == "success"
     assert (tmp_path / "pending.txt").read_text() == "Tool executed."
     assert sum(isinstance(m, AIMessage) for m in result["messages"]) == 4 and result["total_tokens"] == 9 and result["budget_note_sent"]
+
+
+@pytest.mark.parametrize("costs,limit,calls,used,rule", [
+    ([3, 6, 12], 10, 2, 9, "previous call"),
+    ([2, 2, 2], 6, 3, 6, "reported total >= cap"),
+    ([12, 3, 3], 10, 1, 12, "reported total >= cap"),
+    ([None, 6, 12], 10, 2, 6, "previous call"),
+])
+def test_stops_before_likely_crossing_call(tmp_path, costs, limit, calls, used, rule):
+    replies = [call("ls", path="/").model_copy(update={"usage_metadata":
+               dict(input_tokens=n, output_tokens=0, total_tokens=n) if n is not None else None}) for n in costs]
+    model = ScriptedModel(responses=[*replies, AIMessage(content="Unused.")])
+    result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(limit)]).invoke({"messages": [("user", "Read the case.")]})
+    assert model.i == calls and result["total_tokens"] == used
+    assert rule in result["messages"][-1].text
