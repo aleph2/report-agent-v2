@@ -11,6 +11,7 @@ To find a table, grep the page-NNN.txt files for its number (for example 表3-2 
 Read each table page whole, without a line limit, and continue to the next page until the table ends.
 Source pages are under /sources/; /index.md lists them.
 Read the files in /commission/ for this report's scope and rules.
+Copy into the notes, once, the commission's rule on which source prevails when sources disagree, with its citation.
 Ignore /work/runs/; it holds run logs, not evidence.
 If /work/plan.md exists, the section's required contents are under its heading there.
 Read /index.md to find the source files and their page paths.
