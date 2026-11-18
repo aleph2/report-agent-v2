@@ -62,7 +62,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     assert all(m["status"] == "success" for log in (research, draft) for m in log if m["type"] == "tool")
     assert research[0]["content"] == "Gather evidence for the section requested in /commission/."
     if written:
-        assert draft[0]["content"] == "Write the section requested in /commission/ from the notes in /work/notes/."
+        assert draft[0]["content"] == "Write the section from the notes in /work/notes/."
         assert [m["content"] for m in draft if m["type"] == "human"] == [draft[0]["content"]] + (["Token budget reached. Save your work now in one write; do not read anything more."] if written < 4 else [])
     assert [sum((m.get("usage_metadata") or {}).get("total_tokens", 0) for m in log) for log in (research, draft)] == [gathered, written]
     output = capsys.readouterr().out
@@ -96,7 +96,7 @@ def test_cli_write_only(tmp_path, monkeypatch):
     logs = list((tmp_path / "work/runs").glob("*.jsonl"))
     assert len(logs) == 1 and logs[0].name.endswith("-write.jsonl")
     transcript = [json.loads(line) for line in logs[0].read_text().splitlines()]
-    assert transcript[0]["content"] == "Write the section requested in /commission/ from the notes in /work/notes/."
+    assert transcript[0]["content"] == "Write the section from the notes in /work/notes/."
     assert notes in transcript[2]["content"] and transcript[-2]["content"] == "Done." and "2 * previous call" in transcript[-1]["content"]
     assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
     assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
@@ -174,7 +174,7 @@ def test_plan_then_named_section(tmp_path, monkeypatch):
     assert set(logs) == {"plan", "gather", "write"} and logs["plan"][0]["content"] == "Plan the report requested in /commission/."
     for phase, folder in (("gather", "notes"), ("write", "sections")):
         prompt = logs[phase][0]["content"]
-        assert section in prompt and f"## {section}" in prompt and "/work/plan.md" in prompt and f"/work/{folder}/{section}.md" in prompt
+        assert section in prompt and f"## {section}" in prompt and "/work/plan.md" in prompt and f"/work/{folder}/{section}.md" in prompt and (phase != "write" or "/commission/" not in prompt)
 
 
 

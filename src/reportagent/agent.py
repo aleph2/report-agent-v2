@@ -16,6 +16,6 @@ def build_agent(case_dir, model, middleware=()):
         middleware=middleware,
         backend=FilesystemBackend(root_dir=case_dir, virtual_mode=True),
         skills=["/work/skills/"],
-        system_prompt=("You write an assessment section using the files in this case. "
+        system_prompt=("You work on this report using the files in this case. "
                        "Follow the available skills and save your work as case files."),
     )

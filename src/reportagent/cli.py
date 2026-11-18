@@ -44,14 +44,14 @@ def main():
         phases = (
             ("gather", f"Gather evidence for section {name} requested in /commission/. "
              f"{requirements} Save evidence notes to /work/notes/{name}.md."),
-            ("write", f"Write section {name} requested in /commission/. {requirements} "
+            ("write", f"Write section {name}. {requirements} "
              f"Use the evidence notes in /work/notes/{name}.md. "
              f"Save the section to /work/sections/{name}.md."),
         )
     else:
         phases = (
             ("gather", "Gather evidence for the section requested in /commission/."),
-            ("write", "Write the section requested in /commission/ from the notes in /work/notes/."),
+            ("write", "Write the section from the notes in /work/notes/."),
         )
     for phase, prompt in phases:
         gathering = phase == "gather"
