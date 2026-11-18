@@ -95,7 +95,7 @@ def _docx_text(parent, target, images):
 def ingest(case_dir):
     case_dir = Path(case_dir)
     index = ["# Case files\n"]
-    for folder in ("commission", "sources"):
+    for folder in ("commission", "sources", "reference"):
         root = case_dir / folder
         root.mkdir(exist_ok=True)
         for source in sorted(p for p in root.iterdir() if p.is_file()):

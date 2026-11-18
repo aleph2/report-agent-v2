@@ -179,7 +179,7 @@ def test_mixed_case_inputs_and_commission_image(tmp_path):
     image = BytesIO()
     Image.new("RGB", (3, 2), (17, 34, 51)).save(image, "PNG")
     original = {}
-    for folder in ("commission", "sources"):
+    for folder in ("commission", "sources", "reference"):
         root = tmp_path / folder; root.mkdir()
         (root / "brief.md").write_bytes(b"Synthetic scope.\n")
         doc = Document(); doc.add_heading("Synthetic heading", 2)
@@ -192,7 +192,7 @@ def test_mixed_case_inputs_and_commission_image(tmp_path):
         original.update({p: p.read_bytes() for p in root.iterdir()})
     index = cli.ingest(tmp_path)
     assert index == tmp_path / "index.md"
-    for folder in ("commission", "sources"):
+    for folder in ("commission", "sources", "reference"):
         root = tmp_path / folder
         assert (root / "brief.md.files/text.md").read_bytes() == b"Synthetic scope.\n"
         text = (root / "outline.docx.files/text.md").read_text()
