@@ -4,6 +4,7 @@ description: Gather cited evidence and missing facts for the section requested i
 ---
 When this section's notes file already exists, read it first, keep everything in it, and continue with the pages it lists as not yet read before searching again.
 Do not read other sections' notes; read the source pages they cite instead.
+When the section applies a method from a guide or standard, read that method's own tables in the source (search the page-NNN.txt files for the table number) and copy into the notes every indicator, its bands and the weight rule.
 Read the files in /commission/ for this report's scope and rules.
 Ignore /work/runs/; it holds run logs, not evidence.
 If /work/plan.md exists, the section's required contents are under its heading there.
