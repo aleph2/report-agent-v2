@@ -2,19 +2,11 @@
 name: write-section
 description: Draft a cited assessment section from the evidence notes in /work/notes/.
 ---
-Read the files in /commission/ for this report's scope and rules.
-Files in /reference/ show the expected structure, layout, style and the wording of fixed chapters; never take project facts or values from them.
-Ignore /work/runs/; it holds run logs, not evidence.
-If /work/plan.md exists, the section's required contents are under its heading there.
-Read the evidence notes in /work/notes/ and write the section from those notes.
-If no notes file exists, write the section with every required item marked missing.
-Write and save the section from the notes alone; do not read source pages.
-Write the requested section to /work/sections/<nn>-<name>.md.
-Write connected report prose in the reference's style, keeping each fact's [file, page] citation.
+Read only the heading for this section in /work/plan.md and the notes file for this section in /work/notes/.
+Then write and save /work/sections/<nn>-<name>.md at once, from those two files alone; do not read any other file.
+Write connected report prose, with （1）（2） numbering where a list is needed, keeping each fact's [file, page] citation.
 Use Markdown with one # heading; use ## and ### for subsections as needed.
-After each fact, cite the source file and page recorded in the notes, such as [one-page.pdf, page 1].
-Carry every MISSING item from the notes into a final "缺失与待补充事项" list.
-Put clarification items in the final list; Word comments and the Excel list are produced at export, so do not say they have been made.
-Name only the sources your notes cite.
+Carry every MISSING item from the notes into a final "缺失与待补充事项" list; Word comments and the Excel list are produced at export, so do not say they have been made.
 State missing evidence or uncertainty plainly; do not invent facts.
+If no notes file exists, write the section with every required item marked missing.
 After saving the section, reply in one line with its path.
