@@ -58,7 +58,7 @@ def main():
         if gathering and args.write_only:
             continue
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
-        cap = TokenCapMiddleware(limit, remind=gathering)
+        cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather"))
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
         state = {"messages": [HumanMessage(content=prompt)]}
         log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")

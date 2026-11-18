@@ -218,3 +218,19 @@ def test_pdf_timeout_continues(tmp_path, monkeypatch):
         cli.ingest(tmp_path)
     assert (root / "two/page-001.txt").read_text() == "Text extraction timed out. See page-001.png."
     assert (root / "two/page-001.png").exists() and (root / "two/page-002.txt").read_text() == "Second page"
+
+
+
+def test_plan_receives_half_budget_note(tmp_path, monkeypatch):
+    (tmp_path / "commission").mkdir()
+    (tmp_path / "commission/brief.md").write_text("Plan one synthetic section.")
+    plan = "## 01-synthetic\nSynthetic guidance."
+    replies = [call("read_file", file_path="/commission/brief.md"), call("write_file", file_path="/work/plan.md", content=plan), AIMessage(content="Saved.")]
+    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n)}) for reply, n in zip(replies, [6, 1, 1])])
+    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "plan", str(tmp_path), "--max-tokens", "10"])
+    cli.main()
+    messages = [json.loads(line) for line in next((tmp_path / "work/runs").glob("*.jsonl")).read_text().splitlines()]
+    notes = [m for m in messages if m["type"] == "human" and m["content"].startswith("You have used")]
+    assert len(notes) == 1 and notes[0]["content"].startswith("You have used 6 of 10 tokens.")
+    assert messages[messages.index(notes[0]) - 1]["type"] == "tool" and (tmp_path / "work/plan.md").read_text() == plan
