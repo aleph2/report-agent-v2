@@ -12,5 +12,6 @@ Use a guide or standard only for what the section must contain; take facts from 
 Save evidence notes to /work/notes/[section].md: one fact per line with its source file and page in brackets, such as [one-page.pdf, page 1].
 For each required item without supporting evidence, write a MISSING: line describing what is missing.
 State missing evidence or uncertainty plainly; do not invent facts.
-Stop when each required item has evidence or a MISSING line.
+Write MISSING only when the sources do not contain the fact, not when you have not yet read the page that would contain it.
+After saving the notes, keep reading the pages for items you have not yet collected and update the notes; stop when every item is collected or truly missing.
 If a page's text is empty, jumbled or a table you cannot follow, read its page image.

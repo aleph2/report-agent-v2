@@ -11,5 +11,7 @@ Write the requested section to /work/sections/<nn>-<name>.md.
 Use Markdown with one # heading; use ## and ### for subsections as needed.
 After each fact, cite the source file and page recorded in the notes, such as [one-page.pdf, page 1].
 Carry every MISSING item from the notes into a final "缺失与待补充事项" list.
+Put clarification items in the final list; Word comments and the Excel list are produced at export, so do not say they have been made.
+Name only the sources your notes cite.
 State missing evidence or uncertainty plainly; do not invent facts.
 After saving the section, reply in one line with its path.
