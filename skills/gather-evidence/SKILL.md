@@ -6,6 +6,7 @@ When this section's notes file already exists, read it first, keep everything in
 Do not read other sections' notes; read the source pages they cite instead.
 When the section sets out a method from a guide or standard, read that method's tables first (search the page-NNN.txt files for the table numbers) and copy into the notes every indicator with all its bands, the weight rule and the grade thresholds. When the section only applies a method set out in another section, do not gather the method again.
 If the notes of the section that sets out the method already exist in /work/notes/ (for example 03-评估流程和方法.md for a slope), do not search for or read the method's tables or the guide's method pages; gather only this section's own facts.
+When the plan gives scope criteria for items of this kind, record in the notes this item's own values for each criterion (for example height and slope type), from every source page that gives them, and say whether they meet the criteria; do not rely on any grouped conclusion in the plan.
 To find a table, grep the page-NNN.txt files for its number (for example 表3-2 or A.3-1); do not navigate by the contents page, because printed page numbers differ from page-NNN numbers.
 Read each table page whole, without a line limit, and continue to the next page until the table ends.
 Source pages are under /sources/; /index.md lists them.
