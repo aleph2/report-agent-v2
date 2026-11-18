@@ -39,27 +39,27 @@ def test_half_budget_note_preserves_pending_tools(tmp_path):
     (tmp_path / "commission").mkdir(exist_ok=True)
     (tmp_path / "commission/brief.md").write_text("Write one section.")
     replies = [call("read_file", file_path="/commission/brief.md"),
-               call("write_file", file_path="/pending.txt", content="Tool executed."),
-               call("read_file", file_path="/pending.txt"), AIMessage(content="Done.")]
+               call("read_file", file_path="/commission/brief.md"),
+               call("write_file", file_path="/pending.txt", content="Tool executed."), AIMessage(content="Done.")]
     model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=tokens, output_tokens=0, total_tokens=tokens)})
-                                     for reply, tokens in zip(replies, [4, 2, 1, 1])])
+                                     for reply, tokens in zip(replies, [2, 2, 2, 1])])
     result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(12)]).invoke({"messages": [("user", "Write the section.")]})
     notes = [(i, m) for i, m in enumerate(result["messages"]) if isinstance(m, HumanMessage) and m.text.startswith("You have used")]
-    assert len(notes) == 1 and notes[0][0] == 5
+    assert len(notes) == 1 and notes[0][0] == 7
     assert notes[0][1].text == "You have used 6 of 12 tokens. Save your work now from what you have; mark anything missing as missing."
     pending = result["messages"][notes[0][0] - 1]
     assert pending.type == "tool" and pending.tool_call_id == "write_file" and pending.status == "success"
     assert (tmp_path / "pending.txt").read_text() == "Tool executed."
-    assert sum(isinstance(m, AIMessage) for m in result["messages"]) == 4 and result["total_tokens"] == 8 and result["budget_note_sent"]
+    assert sum(isinstance(m, AIMessage) for m in result["messages"]) == 4 and result["total_tokens"] == 7 and result["budget_note_sent"]
 
 
 @pytest.mark.parametrize("costs,limit,calls,used,saved,writing", [
     ([2, 3, 4], 10, 3, 9, True, True),
-    ([2, 2, 2], 6, 3, 6, True, True),
+    ([1, 2, 3], 6, 3, 6, True, True),
     ([12, 3, 3], 10, 1, 12, False, True),
     ([None, 6, 3], 10, 3, 9, True, True),
-    ([3, 6, 12], 10, 3, 21, True, True),
-    ([2, 3, 4], 10, 3, 9, True, False),
+    ([3, 6, 12], 12, 3, 21, True, True),
+    ([1, 2, 3], 8, 3, 6, True, False),
 ])
 def test_final_save_turn(tmp_path, costs, limit, calls, used, saved, writing):
     replies = [call("ls", path="/"), call("ls", path="/"), call("write_file", file_path="/saved.md", content="Saved.") if writing else AIMessage(content="No tool call.")]
@@ -72,6 +72,6 @@ def test_final_save_turn(tmp_path, costs, limit, calls, used, saved, writing):
     if saved:
         if writing:
             assert (tmp_path / "saved.md").read_text() == "Saved." and result["messages"][-2].type == "tool" and result["messages"][-2].status == "success"
-        assert "2 * previous call" in result["messages"][-1].text
+        assert "3 * previous call" in result["messages"][-1].text
     else:
         assert "reported total >= cap" in result["messages"][-1].text

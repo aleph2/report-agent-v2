@@ -33,8 +33,8 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
             return self._end(total)
         previous = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
         last_tokens = ((previous.usage_metadata or {}).get("total_tokens") or 0) if previous else 0
-        if total + 2 * last_tokens > self.max_tokens:
-            return {"final_save_rule": "reported total + 2 * previous call > cap", "messages": [HumanMessage(
+        if total + 3 * last_tokens > self.max_tokens:
+            return {"final_save_rule": "reported total + 3 * previous call > cap", "messages": [HumanMessage(
                 content="Token budget reached. Save your work now in one write; do not read anything more."
             )]}
         # Keep pending tool calls and their results together before adding the note.
