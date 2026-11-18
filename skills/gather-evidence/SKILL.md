@@ -5,6 +5,8 @@ description: Gather cited evidence and missing facts for the section requested i
 When this section's notes file already exists, read it first, keep everything in it, and continue with the pages it lists as not yet read before searching again.
 Do not read other sections' notes; read the source pages they cite instead.
 When the section sets out a method from a guide or standard, read that method's tables first (search the page-NNN.txt files for the table numbers) and copy into the notes every indicator with all its bands, the weight rule and the grade thresholds. When the section only applies a method set out in another section, do not gather the method again.
+To find a table, grep the page-NNN.txt files for its number (for example 表3-2 or A.3-1); do not navigate by the contents page, because printed page numbers differ from page-NNN numbers.
+Read each table page whole, without a line limit, and continue to the next page until the table ends.
 Source pages are under /sources/; /index.md lists them.
 Read the files in /commission/ for this report's scope and rules.
 Ignore /work/runs/; it holds run logs, not evidence.
