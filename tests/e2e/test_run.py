@@ -1,5 +1,7 @@
 import base64
 import json
+from io import BytesIO
+import time
 from pathlib import Path
 from shutil import copyfile
 import sys
@@ -20,7 +22,8 @@ from tests.fake_model import ScriptedModel, call
 @pytest.mark.parametrize("cap,gather_costs,written", [(100, [1, 1, 1], 4), (6, [1, 1, 1], 3), (4, [1, 1], 2), (3, [3], 0)])
 def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     (tmp_path / "sources").mkdir()
-    (tmp_path / "commission.md").write_text("Write the hydrology section.")
+    (tmp_path / "commission").mkdir(exist_ok=True)
+    (tmp_path / "commission/brief.md").write_text("Write the hydrology section.")
     copyfile(Path(__file__).parents[1] / "fixtures/one-page.pdf", tmp_path / "sources/one-page.pdf")
     sentence = "The site drains toward the eastern channel."
     notes = f"{sentence} [one-page.pdf, page 1]\nMISSING: Drainage dimensions."
@@ -45,7 +48,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     for args in (("ingest", str(tmp_path)), ("run", str(tmp_path), "--max-tokens", str(cap))):
         monkeypatch.setattr(sys, "argv", ["reportagent", *args])
         cli.main()
-    assert (tmp_path / "sources/index.md").read_text() == "# Sources\n\n## one-page.pdf\n\nPages: 1\n\nPage paths: sources/one-page/page-001.txt ... page-001.txt\nPage images: sources/one-page/page-001.png ... page-001.png\n\n"
+    assert (tmp_path / "index.md").read_text() == "# Case files\n\n## commission/brief.md\n\nText: commission/brief.md.files/text.md\n\n## sources/one-page.pdf\n\nPages: 1\n\nPage paths: sources/one-page/page-001.txt ... page-001.txt\nPage images: sources/one-page/page-001.png ... page-001.png\n\n"
     with Image.open(tmp_path / "sources/one-page/page-001.png") as image:
         assert image.format == "PNG" and max(image.size) == 1600
     assert len(made) == 1 and limits == [int(cap * 0.6), max(0, cap - gathered)]
@@ -56,8 +59,8 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     research, draft = [[json.loads(line) for line in log.read_text().splitlines()] for log in logs]
     assert sentence in research[2]["content"]
     assert all(m["status"] == "success" for log in (research, draft) for m in log if m["type"] == "tool")
-    assert research[0]["content"] == "Gather evidence for the section requested in /commission.md."
-    assert draft[0]["content"] == "Write the section requested in /commission.md from the notes in /work/notes/."
+    assert research[0]["content"] == "Gather evidence for the section requested in /commission/."
+    assert draft[0]["content"] == "Write the section requested in /commission/ from the notes in /work/notes/."
     assert [m["content"] for m in draft if m["type"] == "human"] == [draft[0]["content"]]
     assert [sum((m.get("usage_metadata") or {}).get("total_tokens", 0) for m in log) for log in (research, draft)] == [gathered, written]
     assert f"Reported tokens: {gathered + written}" in capsys.readouterr().out
@@ -75,7 +78,8 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
 
 
 def test_cli_write_only(tmp_path, monkeypatch):
-    (tmp_path / "commission.md").write_text("Write the hydrology section.")
+    (tmp_path / "commission").mkdir(exist_ok=True)
+    (tmp_path / "commission/brief.md").write_text("Write the hydrology section.")
     notes = "The site drains east. [one-page.pdf, page 1]"
     (tmp_path / "work/notes").mkdir(parents=True)
     (tmp_path / "work/notes/hydrology.md").write_text(notes)
@@ -89,7 +93,7 @@ def test_cli_write_only(tmp_path, monkeypatch):
     logs = list((tmp_path / "work/runs").glob("*.jsonl"))
     assert len(logs) == 1 and logs[0].name.endswith("-write.jsonl")
     transcript = [json.loads(line) for line in logs[0].read_text().splitlines()]
-    assert transcript[0]["content"] == "Write the section requested in /commission.md from the notes in /work/notes/."
+    assert transcript[0]["content"] == "Write the section requested in /commission/ from the notes in /work/notes/."
     assert notes in transcript[2]["content"] and transcript[-1]["content"] == "Done."
     assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
     assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
@@ -125,8 +129,9 @@ def test_failed_run_keeps_conversation(tmp_path, monkeypatch):
 
 
 def test_cli_call_limit_and_missing_usage(tmp_path, monkeypatch):
-    (tmp_path / "commission.md").write_text("Read the commission.")
-    model = ScriptedModel(responses=[call("read_file", file_path="/commission.md") for _ in range(401)])
+    (tmp_path / "commission").mkdir(exist_ok=True)
+    (tmp_path / "commission/brief.md").write_text("Read the commission.")
+    model = ScriptedModel(responses=[call("read_file", file_path="/commission/brief.md") for _ in range(401)])
     monkeypatch.setattr(cli, "make_model", lambda: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "100000"])
     cli.main()
@@ -163,7 +168,53 @@ def test_plan_then_named_section(tmp_path, monkeypatch):
         cli.main()
     assert {path: (tmp_path / path.lstrip("/")).read_text() for path in outputs} == outputs
     logs = {p.stem.rsplit("-", 1)[1]: [json.loads(line) for line in p.read_text().splitlines()] for p in (tmp_path / "work/runs").glob("*.jsonl")}
-    assert set(logs) == {"plan", "gather", "write"} and logs["plan"][0]["content"] == "Plan the report requested in /commission.md."
+    assert set(logs) == {"plan", "gather", "write"} and logs["plan"][0]["content"] == "Plan the report requested in /commission/."
     for phase, folder in (("gather", "notes"), ("write", "sections")):
         prompt = logs[phase][0]["content"]
         assert section in prompt and f"## {section}" in prompt and "/work/plan.md" in prompt and f"/work/{folder}/{section}.md" in prompt
+
+
+
+def test_mixed_case_inputs_and_commission_image(tmp_path):
+    image = BytesIO()
+    Image.new("RGB", (3, 2), (17, 34, 51)).save(image, "PNG")
+    original = {}
+    for folder in ("commission", "sources"):
+        root = tmp_path / folder; root.mkdir()
+        (root / "brief.md").write_bytes(b"Synthetic scope.\n")
+        doc = Document(); doc.add_heading("Synthetic heading", 2)
+        table = doc.add_table(rows=1, cols=2); table.cell(0, 0).text = "A"; table.cell(0, 1).text = "B"
+        paragraph = doc.add_paragraph("Before"); paragraph.add_run().add_picture(BytesIO(image.getvalue())); paragraph.add_run("After")
+        doc.save(root / "outline.docx")
+        (root / "broken.docx").write_text("Not a DOCX package.")
+        (root / "other.bin").write_bytes(b"Unknown file type.")
+        copyfile(Path(__file__).parents[1] / "fixtures/one-page.pdf", root / "one.pdf")
+        original.update({p: p.read_bytes() for p in root.iterdir()})
+    index = cli.ingest(tmp_path)
+    assert index == tmp_path / "index.md"
+    for folder in ("commission", "sources"):
+        root = tmp_path / folder
+        assert (root / "brief.md.files/text.md").read_bytes() == b"Synthetic scope.\n"
+        text = (root / "outline.docx.files/text.md").read_text()
+        assert "## Synthetic heading" in text and "A | B" in text and "Before\n[image-01.png]\nAfter" in text
+        with Image.open(root / "outline.docx.files/image-01.png") as actual: assert actual.convert("RGB").getpixel((0, 0)) == (17, 34, 51)
+        assert (root / "one/page-001.txt").read_text().strip() and (root / "one/page-001.png").exists()
+        for name in ("broken.docx", "other.bin"): assert (root / f"{name}.files/text.md").read_text().startswith("Could not read: ")
+        assert all(f"{folder}/{name}" in index.read_text() for name in ("brief.md", "outline.docx", "broken.docx", "other.bin", "one.pdf"))
+    assert all(p.read_bytes() == data for p, data in original.items())
+    with patch.object(ScriptedModel, "_generate", autospec=True, side_effect=ScriptedModel._generate) as generated:
+        cli.build_agent(tmp_path, ScriptedModel(responses=[call("read_file", file_path="/commission/outline.docx.files/image-01.png"), AIMessage(content="Done.")])).invoke({"messages": [("user", "Read the instruction image.")]})
+    assert base64.b64decode(generated.call_args_list[1].args[1][-1].content_blocks[0]["base64"]) == (tmp_path / "commission/outline.docx.files/image-01.png").read_bytes()
+
+
+def test_pdf_timeout_continues(tmp_path, monkeypatch):
+    import reportagent.ingest as module
+    root = tmp_path / "sources"; root.mkdir()
+    with pdfium.PdfDocument.new() as pdf:
+        for _ in range(2): pdf.new_page(300, 200).close()
+        pdf.save(root / "two.pdf")
+    monkeypatch.setattr(module, "PDF_TEXT_TIMEOUT", 0.2, raising=False)
+    with patch("pdfplumber.page.Page.extract_text", autospec=True, side_effect=lambda page: time.sleep(1) if page.page_number == 1 else "Second page"):
+        cli.ingest(tmp_path)
+    assert (root / "two/page-001.txt").read_text() == "Text extraction timed out. See page-001.png."
+    assert (root / "two/page-001.png").exists() and (root / "two/page-002.txt").read_text() == "Second page"

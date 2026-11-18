@@ -2,9 +2,9 @@
 name: gather-evidence
 description: Gather cited evidence and missing facts for the section requested in the commission.
 ---
-Read /commission.md to understand the requested report and section.
+Read the files in /commission/ for this report's scope and rules.
 If /work/plan.md exists, the section's required contents are under its heading there.
-Read /sources/index.md to find the source files and their page paths.
+Read /index.md to find the source files and their page paths.
 The index gives each PDF's page range; do not list page folders.
 Use grep to find the pages you need, and read only those.
 Read the guide or standard's list of required contents for the section.

@@ -9,7 +9,8 @@ from tests.fake_model import ScriptedModel, call
 
 
 def test_token_cap(tmp_path, monkeypatch):
-    (tmp_path / "commission.md").write_text("Write one section.")
+    (tmp_path / "commission").mkdir(exist_ok=True)
+    (tmp_path / "commission/brief.md").write_text("Write one section.")
     monkeypatch.setattr(SummarizationMiddleware, "wrap_model_call", lambda *args, **kwargs: pytest.fail("Automatic summarization bypasses the main token counter."))
     original = ScriptedModel.bind_tools
     def bind(self, tools, **kwargs):
@@ -17,7 +18,7 @@ def test_token_cap(tmp_path, monkeypatch):
         return original(self, tools, **kwargs)
     monkeypatch.setattr(ScriptedModel, "bind_tools", bind)
     model = ScriptedModel(responses=[
-        call("read_file", file_path="/commission.md").model_copy(update={"usage_metadata": dict(input_tokens=6, output_tokens=1, total_tokens=7)}),
+        call("read_file", file_path="/commission/brief.md").model_copy(update={"usage_metadata": dict(input_tokens=6, output_tokens=1, total_tokens=7)}),
         call("write_file", file_path="/work/sections/at-cap.md", content="Saved at cap.").model_copy(update={"usage_metadata": dict(input_tokens=7, output_tokens=1, total_tokens=8)}),
         AIMessage(content="This response must remain unused."),
     ])
@@ -35,8 +36,9 @@ def test_no_call_when_budget_is_already_exhausted(tmp_path, cap):
 
 
 def test_half_budget_note_preserves_pending_tools(tmp_path):
-    (tmp_path / "commission.md").write_text("Write one section.")
-    replies = [call("read_file", file_path="/commission.md"),
+    (tmp_path / "commission").mkdir(exist_ok=True)
+    (tmp_path / "commission/brief.md").write_text("Write one section.")
+    replies = [call("read_file", file_path="/commission/brief.md"),
                call("write_file", file_path="/pending.txt", content="Tool executed."),
                call("read_file", file_path="/pending.txt"), AIMessage(content="Done.")]
     model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=tokens, output_tokens=0, total_tokens=tokens)})

@@ -37,21 +37,21 @@ def main():
     folder = args.case / "work/runs"
     folder.mkdir(parents=True, exist_ok=True)
     if args.command == "plan":
-        phases = (("plan", "Plan the report requested in /commission.md."),)
+        phases = (("plan", "Plan the report requested in /commission/."),)
     elif args.section:
         name = args.section
         requirements = f"Its required contents are under heading ## {name} in /work/plan.md."
         phases = (
-            ("gather", f"Gather evidence for section {name} requested in /commission.md. "
+            ("gather", f"Gather evidence for section {name} requested in /commission/. "
              f"{requirements} Save evidence notes to /work/notes/{name}.md."),
-            ("write", f"Write section {name} requested in /commission.md. {requirements} "
+            ("write", f"Write section {name} requested in /commission/. {requirements} "
              f"Use the evidence notes in /work/notes/{name}.md. "
              f"Save the section to /work/sections/{name}.md."),
         )
     else:
         phases = (
-            ("gather", "Gather evidence for the section requested in /commission.md."),
-            ("write", "Write the section requested in /commission.md from the notes in /work/notes/."),
+            ("gather", "Gather evidence for the section requested in /commission/."),
+            ("write", "Write the section requested in /commission/ from the notes in /work/notes/."),
         )
     for phase, prompt in phases:
         gathering = phase == "gather"

@@ -2,7 +2,7 @@
 name: write-section
 description: Draft a cited assessment section from the evidence notes in /work/notes/.
 ---
-Read /commission.md to understand the requested report and section.
+Read the files in /commission/ for this report's scope and rules.
 If /work/plan.md exists, the section's required contents are under its heading there.
 Read the evidence notes in /work/notes/ and write the section from those notes.
 If no notes file exists, write the section with every required item marked missing.
