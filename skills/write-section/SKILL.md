@@ -17,6 +17,7 @@ Then write and save /work/sections/<nn>-<name>.md at once, from those files alon
 Write connected report prose, with （1）（2） numbering where a list is needed, keeping each fact's [file, page] citation.
 Use Markdown with one # heading; use ## and ### for subsections as needed.
 Save every MISSING or unresolved item in /work/clarifications/<name>.md, one block per item separated by ---: number:, anchor: 「exact body sentence」, content:, sources:. Keep existing numbers; new items use unused numbers, never a retired number.
+Write each clarification source as its full file name and page (or item for an unpaged answer file); never use 同上 or same as above, because client rows stand alone.
 Also give object: (the client's item name), question: (one direct client question), required: (the settling document or value), effect: (quantified score/grade impact, or descriptive only), and rank: 1 for grade changes, 2 for score only, 3 for description.
 The body has no 缺失与待补充事项 section or references such as 见第X节第N项. Word comments and Excel rows are produced at export; do not say they have been made.
 State missing evidence or uncertainty plainly; do not invent facts.
