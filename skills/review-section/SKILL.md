@@ -3,6 +3,7 @@ name: review-section
 description: Review a drafted section against its method, cited sources and scope, and save findings without editing it.
 ---
 If /work/checks/<name>.md exists, read it first and verify each listed item.
+From the check file, verify first the items that concern scored inputs and absence claims; values derived by calculation (weights, products, totals) need no source page.
 Read the section, its notes, its heading in /work/plan.md, and the notes of the section whose method it applies (03-评估流程和方法.md for slopes).
 Open in full every source page the section cites for a scored value. When checking facts the notes call absent, search for this item and open in full every page the hits point to.
 Check these in order:

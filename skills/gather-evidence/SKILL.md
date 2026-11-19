@@ -2,7 +2,8 @@
 name: gather-evidence
 description: Gather cited evidence and missing facts for the section requested in the commission.
 ---
-When this section's notes file already exists, read it first, keep everything in it, and continue with the pages it lists as not yet read before searching again.
+If /commission/澄清答复.md exists, read it first and record in the notes every answer that concerns this section.
+When this section's notes file already exists, read it next, keep everything in it, and continue with the pages it lists as not yet read before searching again.
 Do not read other sections' notes; read the source pages they cite instead.
 When the section sets out a method from a guide or standard, read that method's tables first (search the page-NNN.txt files for the table numbers) and copy into the notes every indicator with all its bands, the weight rule and the grade thresholds. When the section only applies a method set out in another section, do not gather the method again.
 If the notes of the section that sets out the method already exist in /work/notes/ (for example 03-评估流程和方法.md for a slope), do not search for or read the method's tables or the guide's method pages; gather only this section's own facts.
