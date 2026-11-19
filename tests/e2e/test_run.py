@@ -358,3 +358,75 @@ def test_verified_citations_produce_empty_check(tmp_path):
     notes = tmp_path / "work/notes"; notes.mkdir()
     (notes / "demo.md").touch()
     assert cli.check(tmp_path, "demo").read_text() == ""
+
+
+def test_export_tables_comments_and_clarifications(tmp_path):
+    from zipfile import ZipFile
+    from xml.etree import ElementTree as ET
+    from docx.oxml.ns import qn
+    from docx.shared import Mm, Pt
+    work = tmp_path / "work"; sections = work / "sections"; sections.mkdir(parents=True)
+    (work / "plan.md").write_text("报告对象：测试项目 测试报告。\n## 01-概述\n## 03-方法\n## 02-工程概况\n## 04-评估\n## 04-1-边坡\n## 05-结论\n## 06-遗留问题\n")
+    (sections / "03-方法.md").write_text("# 03 方法\n\n方法说明。")
+    (sections / "02-工程概况.md").write_text("# 02-工程概况\n\n第一句。第二句含 **加粗**、*f*<sub>a0</sub>、Q<sup>ml</sup> 及 R*W*X [design.pdf, page 1]。\n\n## 2.1 参数\n\n表2.1-1 的数值说明。\n\n**表2.1-1 参数**\n\n| 项目 | 值 | 来源 |\n| :--- | :---: | ---: |\n| 高度 | **42.6** | *note [design.pdf, page 2]* |\n| a\\|b | _italic_ | first<br>second |\n| only |\n| | | |\n||tail\\|||\n\n## 缺失与待补充事项\n\n说明文字。\n\n（1）参数 & 变形待核 [design.pdf, page 3]。\n\n（2）位置待核。")
+    wide = "\n\n## 2.2 Scoring\n\n| 指标 | 档位 | 范围 | 分值 | 权重 | 得分 | 依据 | 备注 |\n| --- | --- | --- | ---: | ---: | ---: | --- | --- |\n" + "".join(f"| X{i} | band | 50~74 | 65.4 | 0.17 | 11.12 | evidence | note |\n" for i in range(1, 12))
+    section_file = sections / "02-工程概况.md"
+    section_file.write_text(section_file.read_text().replace("\n\n## 缺失与待补充事项", wide + "\n\n## 缺失与待补充事项"))
+    (sections / "04-1-边坡.md").write_text("# 4.1 边坡\n\n## 缺失与待补充事项\n\n1. 岩性待核 [design.pdf, page 4]。")
+    before = {p: p.read_bytes() for p in work.rglob("*.md")}
+    target = cli.export_docx(tmp_path)
+    doc = Document(target)
+    assert len(doc.tables) == 2 and doc.tables[0].cell(1, 1).text == "42.6"
+    assert doc.tables[0].rows[0]._tr.xpath("./w:trPr/w:tblHeader")
+    assert doc.tables[0].autofit is False
+    table = doc.tables[0]
+    assert [c.paragraphs[0].alignment for c in table.rows[0].cells] == [0, 1, 2]
+    assert any(r.bold for r in table.cell(1, 1).paragraphs[0].runs)
+    assert table.cell(1, 2).text == "note " and any(r.italic for r in table.cell(1, 2).paragraphs[0].runs)
+    assert [c.text for c in table.rows[2].cells] == ["a|b", "italic", "first\nsecond"]
+    assert any(r.italic for r in table.cell(2, 1).paragraphs[0].runs)
+    assert [c.text for c in table.rows[3].cells] == ["only", "", ""]
+    assert [c.text for c in table.rows[4].cells] == ["", "", ""]
+    assert [c.text for c in table.rows[5].cells] == ["", "tail|", ""]
+    wide = doc.tables[1]
+    assert len(wide.rows) == 12 and len(wide.columns) == 8 and all(r.cells[3].text == "65.4" for r in wide.rows[1:])
+    assert sum(c.width for c in wide.columns) <= doc.sections[0].page_width - doc.sections[0].left_margin - doc.sections[0].right_margin + Mm(1)
+    assert [p.text for p in doc.paragraphs].count("本章待编写") == 3
+    body = "\n".join(p.text for p in doc.paragraphs)
+    assert body.index("方法") < body.index("工程概况") and "[design.pdf" not in body
+    assert "f_a0" in body and "Q^ml" in body and "R*W*X" in body and "<sub>" not in body
+    assert any(run.bold and run.text == "加粗" for p in doc.paragraphs for run in p.runs)
+    assert len(doc.comments) == 7 and all(c.author == "Report Agent" for c in doc.comments)
+    source = next(c for c in doc.comments if c.text == "来源：design.pdf, page 1")
+    anchors, active = [], False
+    for p in doc.paragraphs:
+        for child in p._p:
+            if child.tag == qn("w:commentRangeStart") and child.get(qn("w:id")) == str(source.comment_id):
+                active = True
+            elif child.tag == qn("w:commentRangeEnd") and child.get(qn("w:id")) == str(source.comment_id):
+                active = False
+            elif active:
+                anchors.extend(child.xpath(".//w:t/text()"))
+    assert "第二句" in "".join(anchors) and "第一句" not in "".join(anchors)
+    assert len(doc.element.xpath(".//w:commentRangeStart")) == len(doc.element.xpath(".//w:commentRangeEnd")) == 7
+    assert any("TOC " in node.text for node in doc.element.xpath(".//w:instrText"))
+    section = doc.sections[0]
+    assert abs(section.page_width - Mm(210)) < Mm(.1) and abs(section.right_margin - Mm(15)) < Mm(.1)
+    assert doc.styles["Normal"].font.size == Pt(12) and doc.styles["Heading 1"].font.size == Pt(18)
+    assert doc.styles["Caption"].font.size == Pt(10.5)
+    assert next(p for p in doc.paragraphs if p.text == "表2.1-1 参数").style.name == "Caption"
+    assert next(p for p in doc.paragraphs if p.text == "表2.1-1 参数").paragraph_format.keep_with_next
+    assert next(p for p in doc.paragraphs if p.text == "表2.1-1 的数值说明。").style.name == "Normal"
+    assert doc.styles["TOC Heading"].element.get_or_add_pPr().get_or_add_numPr().numId.val == 0
+    assert doc.styles["toc 1"].builtin and doc.styles["toc 1"].font.bold
+    assert doc.styles["toc 2"].builtin and doc.styles["toc 2"].font.bold is False
+    with ZipFile(tmp_path / "out/待澄清清单.xlsx") as archive:
+        assert archive.testzip() is None
+        sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        rows = [[c.findtext("s:is/s:t", namespaces=ns) if c.get("t") == "inlineStr" else c.findtext("s:v", namespaces=ns) for c in row] for row in sheet.findall("s:sheetData/s:row", ns)]
+    assert rows[0] == ["编号", "章节", "位置（段落首句）", "内容", "依据/来源", "状态"]
+    assert len(rows) == 4 and [r[0] for r in rows[1:]] == ["1", "2", "3"]
+    assert [r[1] for r in rows[1:]] == ["02-工程概况", "02-工程概况", "04-1-边坡"]
+    assert all(r[-1] == "待澄清" for r in rows[1:]) and "design.pdf, page 3" in rows[1][4]
+    assert "参数 & 变形待核" in rows[1][3] and all(p.read_bytes() == data for p, data in before.items())
