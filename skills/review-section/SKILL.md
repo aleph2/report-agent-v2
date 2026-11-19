@@ -5,6 +5,7 @@ description: Review a drafted section against its method, cited sources and scop
 If /work/checks/<name>.md exists, read it first and verify each listed item.
 From the check file, verify first the items that concern scored inputs and absence claims; values derived by calculation (weights, products, totals) need no source page.
 Read the section, its notes, its heading in /work/plan.md, and the notes of the section whose method it applies (03-评估流程和方法.md for slopes).
+Read this section's /work/clarifications/<name>.md and, if present, /commission/澄清答复.md; check matching numbers and answers, and check that the body has no 缺失与待补充事项 section or references to that list.
 Open in full every source page the section cites for a scored value. When checking facts the notes call absent, search for this item and open in full every page the hits point to.
 Check these in order:
 1. The method recorded in the method section's notes: every indicator present, the weight rule, band boundaries, in-band placement explained, total and grade arithmetic.

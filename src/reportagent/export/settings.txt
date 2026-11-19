@@ -1,0 +1,38 @@
+toc_title: Contents
+toc_levels: 1-3
+toc_style: TOC Heading
+placeholder: Not written
+caption_prefixes: Table|Figure
+caption_style: Caption
+list_pattern: ^(?:(?P<number>\d+)[.)]|[-*](?=\s))\s*
+list_format: {number}.
+list_style: List Paragraph
+heading_pattern:
+header_fields: project|title
+footer_field: PAGE
+citation_pattern: \[[^\]\n]*(?:pages?\s*\d|item\s*\d)[^\]\n]*\]
+citation_prefix: Source:\u0020
+comment_author: Renderer
+item_prefix: Item\u0020
+item_status: Open
+sheet_name: Items
+sheet_columns: Id|Section|Location|Content|Sources|Status|Answer|Responder
+sheet_fields: number|section|position|content|sources|status|answer|responder
+sheet_sort:
+sheet_sort_default: 4
+answers_file:
+answer_author:
+sheet_widths: 8|28|42|90|64|14|60|22
+sheet_font: Arial
+sheet_size: 11
+sheet_header_fill: FFD9E2F3
+docx_file: report.docx
+xlsx_file: items.xlsx
+body_style: Normal
+table_style: Table Text
+table_size: 10.5
+table_padding: 12
+table_new_page_rows: 0
+table_alignment: center
+table_border: double
+table_border_size: 4

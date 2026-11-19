@@ -27,7 +27,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     copyfile(Path(__file__).parents[1] / "fixtures/one-page.pdf", tmp_path / "sources/one-page.pdf")
     sentence = "The site drains toward the eastern channel."
     notes = f"{sentence} [one-page.pdf, page 1]\nMISSING: Drainage dimensions."
-    section = f"# Hydrology\n\n## Drainage\n\n### Direction\n\n{sentence} [one-page.pdf, page 1]\n\n## 缺失与待补充事项\n\nDrainage dimensions."
+    section = f"# Hydrology\n\n## Drainage\n\n### Direction\n\n{sentence} [one-page.pdf, page 1]"
     gather = [call("read_file", file_path="/sources/one-page/page-001.txt"),
               call("write_file", file_path="/work/notes/hydrology.md", content=notes), AIMessage(content="Evidence saved.")]
     replies = [call("read_file", file_path="/work/notes/hydrology.md"),
@@ -360,73 +360,181 @@ def test_verified_citations_produce_empty_check(tmp_path):
     assert cli.check(tmp_path, "demo").read_text() == ""
 
 
-def test_export_tables_comments_and_clarifications(tmp_path):
+
+def test_export_generic_template_and_explicit_items(tmp_path):
     from zipfile import ZipFile
-    from xml.etree import ElementTree as ET
-    from docx.oxml.ns import qn
+    from xml.etree import ElementTree as E
     from docx.shared import Mm, Pt
+    from docx.enum.style import WD_STYLE_TYPE
+    template = tmp_path / "commission/template"; template.mkdir(parents=True)
+    ref = Document(); ref.styles["Normal"].font.size = Pt(12)
+    ref.styles["Heading 1"].font.size = Pt(18)
+    ref.styles["Caption"].font.size = Pt(10.5)
+    ref.styles.add_style("Table Text", WD_STYLE_TYPE.PARAGRAPH).font.size = Pt(10.5)
+    ref.sections[0].page_width = Mm(210); ref.sections[0].page_height = Mm(297)
+    ref.sections[0].right_margin = Mm(15)
+    ref.sections[0].header.paragraphs[0].text = "{{project}} | {{title}}"
+    ref.save(template / "reference.docx")
+    settings = "toc_title: Contents\nplaceholder: Not written\ncaption_prefixes: Table|Figure\ncitation_prefix: Source: \ncomment_author: Renderer\nitem_prefix: Item \nsheet_name: Questions\nsheet_columns: Id|Section|Location|Content|Sources|Status|Answer|Responder\nxlsx_file: questions.xlsx\nitem_status: Open\ntable_new_page_rows: 10\n"
+    assert not any(word in settings for word in ("缺失", "待澄清", "目录", "来源"))
+    (template / "settings.txt").write_text(settings)
     work = tmp_path / "work"; sections = work / "sections"; sections.mkdir(parents=True)
-    (work / "plan.md").write_text("报告对象：测试项目 测试报告。\n## 01-概述\n## 03-方法\n## 02-工程概况\n## 04-评估\n## 04-1-边坡\n## 05-结论\n## 06-遗留问题\n")
-    (sections / "03-方法.md").write_text("# 03 方法\n\n方法说明。")
-    (sections / "02-工程概况.md").write_text("# 02-工程概况\n\n第一句。第二句含 **加粗**、*f*<sub>a0</sub>、Q<sup>ml</sup> 及 R*W*X [design.pdf, page 1]。\n\n## 2.1 参数\n\n表2.1-1 的数值说明。\n\n**表2.1-1 参数**\n\n| 项目 | 值 | 来源 |\n| :--- | :---: | ---: |\n| 高度 | **42.6** | *note [design.pdf, page 2]* |\n| a\\|b | _italic_ | first<br>second |\n| only |\n| | | |\n||tail\\|||\n\n## 缺失与待补充事项\n\n说明文字。\n\n（1）参数 & 变形待核 [design.pdf, page 3]。\n\n（2）位置待核。")
-    wide = "\n\n## 2.2 Scoring\n\n| 指标 | 档位 | 范围 | 分值 | 权重 | 得分 | 依据 | 备注 |\n| --- | --- | --- | ---: | ---: | ---: | --- | --- |\n" + "".join(f"| X{i} | band | 50~74 | 65.4 | 0.17 | 11.12 | evidence | note |\n" for i in range(1, 12))
-    section_file = sections / "02-工程概况.md"
-    section_file.write_text(section_file.read_text().replace("\n\n## 缺失与待补充事项", wide + "\n\n## 缺失与待补充事项"))
-    (sections / "04-1-边坡.md").write_text("# 4.1 边坡\n\n## 缺失与待补充事项\n\n1. 岩性待核 [design.pdf, page 4]。")
-    before = {p: p.read_bytes() for p in work.rglob("*.md")}
-    target = cli.export_docx(tmp_path)
-    doc = Document(target)
-    assert len(doc.tables) == 2 and doc.tables[0].cell(1, 1).text == "42.6"
-    assert doc.tables[0].rows[0]._tr.xpath("./w:trPr/w:tblHeader")
-    assert doc.tables[0].autofit is False
-    table = doc.tables[0]
+    (work / "plan.md").write_text("---\ntitle: Sample\nproject: Site\nsection: 1|01-overview\nsection: 1|03-method\nsection: 1|02-context\nsection: 1|04-analysis\nsection: 2|04-1-item\nsection: 1|05-conclusion\nsection: 1|06-followup\n---\n")
+    (sections / "03-method.md").write_text("# Method\n\nMethod text.")
+    content = "# Context\n\nFirst sentence. Second sentence with **bold**, *f*<sub>a0</sub>, Q<sup>ml</sup> and R*W*X. [design.pdf, page 1]\n\n[design.pdf, page 5]\n\n## Parameters\n\nTable 2.1-1 has explanatory text.\n\n**Table 2.1-1 Parameters**\n\n| Item | Value | Source |\n| :--- | :---: | ---: |\n| Height | **42.6** | *note [design.pdf, page 2]* |\n| a\\|b | _italic_ | first<br>second |\n| only |\n| | | |\n||tail\\|||\n"
+    wide = "\n\nTable 2.2-1 Scores\n\n| Indicator | Band | Range | Score | Weight | Result | Evidence | Note |\n| --- | --- | --- | ---: | ---: | ---: | --- | --- |\n" + "".join(f"| X{i} | band | 50~74 | 65.4 | 0.17 | 11.12 | evidence | note |\n" for i in range(1, 12))
+    (sections / "02-context.md").write_text(content + wide)
+    (sections / "04-1-item.md").write_text("# Item\n\nItem text.")
+    clar = work / "clarifications"; clar.mkdir()
+    anchor = "Second sentence with bold, f_a0, Q^ml and R*W*X."
+    (clar / "02-context.md").write_text(f"number: 7\nanchor: 「{anchor}」\ncontent: Parameters & deformation need confirmation.\nsources: design.pdf, page 3\n\n---\n\nnumber: 9\nanchor: 「Not present.」\ncontent: Location needs confirmation.\nsources:\n")
+    (clar / "04-1-item.md").write_text("number: 31\nanchor: 「」\ncontent: Lithology uncertain.\nsources: design.pdf, page 4\n")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    doc = Document(cli.export_docx(tmp_path)); table = doc.tables[0]
+    assert len(doc.tables) == 2 and table.cell(1, 1).text == "42.6"
+    assert table.rows[0]._tr.xpath("./w:trPr/w:tblHeader") and table.autofit is False
     assert [c.paragraphs[0].alignment for c in table.rows[0].cells] == [0, 1, 2]
     assert any(r.bold for r in table.cell(1, 1).paragraphs[0].runs)
     assert table.cell(1, 2).text == "note " and any(r.italic for r in table.cell(1, 2).paragraphs[0].runs)
     assert [c.text for c in table.rows[2].cells] == ["a|b", "italic", "first\nsecond"]
-    assert any(r.italic for r in table.cell(2, 1).paragraphs[0].runs)
     assert [c.text for c in table.rows[3].cells] == ["only", "", ""]
     assert [c.text for c in table.rows[4].cells] == ["", "", ""]
     assert [c.text for c in table.rows[5].cells] == ["", "tail|", ""]
-    wide = doc.tables[1]
-    assert len(wide.rows) == 12 and len(wide.columns) == 8 and all(r.cells[3].text == "65.4" for r in wide.rows[1:])
-    assert sum(c.width for c in wide.columns) <= doc.sections[0].page_width - doc.sections[0].left_margin - doc.sections[0].right_margin + Mm(1)
-    assert [p.text for p in doc.paragraphs].count("本章待编写") == 3
+    assert len(doc.tables[1].rows) == 12 and len(doc.tables[1].columns) == 8
+    assert sum(c.width for c in doc.tables[1].columns) <= doc.sections[0].page_width - doc.sections[0].left_margin - doc.sections[0].right_margin + Mm(1)
     body = "\n".join(p.text for p in doc.paragraphs)
-    assert body.index("方法") < body.index("工程概况") and "[design.pdf" not in body
-    assert "f_a0" in body and "Q^ml" in body and "R*W*X" in body and "<sub>" not in body
-    assert any(run.bold and run.text == "加粗" for p in doc.paragraphs for run in p.runs)
-    assert len(doc.comments) == 7 and all(c.author == "Report Agent" for c in doc.comments)
-    source = next(c for c in doc.comments if c.text == "来源：design.pdf, page 1")
-    anchors, active = [], False
-    for p in doc.paragraphs:
-        for child in p._p:
-            if child.tag == qn("w:commentRangeStart") and child.get(qn("w:id")) == str(source.comment_id):
-                active = True
-            elif child.tag == qn("w:commentRangeEnd") and child.get(qn("w:id")) == str(source.comment_id):
-                active = False
-            elif active:
-                anchors.extend(child.xpath(".//w:t/text()"))
-    assert "第二句" in "".join(anchors) and "第一句" not in "".join(anchors)
-    assert len(doc.element.xpath(".//w:commentRangeStart")) == len(doc.element.xpath(".//w:commentRangeEnd")) == 7
-    assert any("TOC " in node.text for node in doc.element.xpath(".//w:instrText"))
-    section = doc.sections[0]
-    assert abs(section.page_width - Mm(210)) < Mm(.1) and abs(section.right_margin - Mm(15)) < Mm(.1)
+    assert body.index("Method") < body.index("Context") and body.count("Not written") == 3
+    assert "Parameters & deformation" not in body and "[design.pdf" not in body
+    assert "f_a0" in body and "Q^ml" in body and "R*W*X" in body
+    assert len(doc.comments) == 6 and all(c.author == "Renderer" for c in doc.comments)
+    assert doc.sections[0].header.paragraphs[0].text == "Site | Sample"
     assert doc.styles["Normal"].font.size == Pt(12) and doc.styles["Heading 1"].font.size == Pt(18)
-    assert doc.styles["Caption"].font.size == Pt(10.5)
-    assert next(p for p in doc.paragraphs if p.text == "表2.1-1 参数").style.name == "Caption"
-    assert next(p for p in doc.paragraphs if p.text == "表2.1-1 参数").paragraph_format.keep_with_next
-    assert next(p for p in doc.paragraphs if p.text == "表2.1-1 的数值说明。").style.name == "Normal"
-    assert doc.styles["TOC Heading"].element.get_or_add_pPr().get_or_add_numPr().numId.val == 0
-    assert doc.styles["toc 1"].builtin and doc.styles["toc 1"].font.bold
-    assert doc.styles["toc 2"].builtin and doc.styles["toc 2"].font.bold is False
-    with ZipFile(tmp_path / "out/待澄清清单.xlsx") as archive:
-        assert archive.testzip() is None
-        sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+    assert next(p for p in doc.paragraphs if p.text == "Table 2.1-1 Parameters").style.name == "Caption"
+    assert next(p for p in doc.paragraphs if p.text == "Table 2.1-1 Parameters").paragraph_format.keep_with_next
+    assert next(p for p in doc.paragraphs if p.text == "Table 2.2-1 Scores").paragraph_format.page_break_before
+    assert not next(p for p in doc.paragraphs if p.text == "Table 2.1-1 Parameters").paragraph_format.page_break_before
+    assert next(p for p in doc.paragraphs if p.text == "Table 2.1-1 has explanatory text.").style.name == "Normal"
+    positions = {}
+    for comment in doc.comments:
+        active, text = False, []
+        for para in doc.element.xpath(".//w:p"):
+            for child in para:
+                if child.tag.endswith("}commentRangeStart") and child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id") == str(comment.comment_id): active = True
+                elif child.tag.endswith("}commentRangeEnd") and child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id") == str(comment.comment_id): active = False
+                elif active: text.extend(t.text or "" for t in child.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"))
+        positions[comment.text.split("\n", 1)[0]] = "".join(text)
+    assert positions["Source: design.pdf, page 1"].strip() == anchor and positions["Source: design.pdf, page 5"].strip() == anchor
+    assert positions["Item 7"] == anchor and positions["Item 9"] == "Context" and positions["Item 31"] == "Item"
+    assert len(doc.element.xpath(".//w:commentRangeStart")) == len(doc.element.xpath(".//w:commentRangeEnd")) == 6
+    assert any("TOC " in n.text for n in doc.element.xpath(".//w:instrText"))
+    with ZipFile(tmp_path / "out/questions.xlsx") as z:
+        assert z.testzip() is None
         ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-        rows = [[c.findtext("s:is/s:t", namespaces=ns) if c.get("t") == "inlineStr" else c.findtext("s:v", namespaces=ns) for c in row] for row in sheet.findall("s:sheetData/s:row", ns)]
-    assert rows[0] == ["编号", "章节", "位置（段落首句）", "内容", "依据/来源", "状态"]
-    assert len(rows) == 4 and [r[0] for r in rows[1:]] == ["1", "2", "3"]
-    assert [r[1] for r in rows[1:]] == ["02-工程概况", "02-工程概况", "04-1-边坡"]
-    assert all(r[-1] == "待澄清" for r in rows[1:]) and "design.pdf, page 3" in rows[1][4]
-    assert "参数 & 变形待核" in rows[1][3] and all(p.read_bytes() == data for p, data in before.items())
+        sheet = E.fromstring(z.read("xl/worksheets/sheet1.xml"))
+        rows = [[c.findtext("s:v", namespaces=ns) if c.get("t") == "n" else "".join(t.text or "" for t in c.findall(".//s:t", ns)) for c in row] for row in sheet.findall("s:sheetData/s:row", ns)]
+    assert rows[0] == ["Id", "Section", "Location", "Content", "Sources", "Status", "Answer", "Responder"]
+    assert [r[0] for r in rows[1:]] == ["7", "9", "31"]
+    assert [r[2] for r in rows[1:]] == [anchor, "Context", "Item"]
+    assert all(r[5:] == ["Open", "", ""] for r in rows[1:])
+    assert len(rows) - 1 == sum(c.text.startswith("Item ") for c in doc.comments)
+    assert all(p.read_bytes() == data for p, data in before.items())
+
+
+def test_export_explicit_numbers_preserve_owner_input(tmp_path, monkeypatch):
+    from zipfile import ZipFile
+    from xml.etree import ElementTree as E
+    work = tmp_path / "work"; sections = work / "sections"; sections.mkdir(parents=True)
+    clar = work / "clarifications"; clar.mkdir()
+    plan = work / "plan.md"
+    plan.write_text("---\nsection: 1|a\nsection: 1|b\n---\n")
+    for name in ("a", "b"): (sections / f"{name}.md").write_text(f"# {name}\n\nBody sentence.")
+    a = clar / "a.md"; a.write_text("number: 11\nanchor: 「Body sentence.」\ncontent: First.\nsources:\n")
+    (clar / "b.md").write_text("number: 30\nanchor: 「」\ncontent: Second.\nsources:\n")
+    cli.export_docx(tmp_path); target = tmp_path / "out/items.xlsx"
+    ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}; tag = "{" + ns["s"] + "}"
+    with ZipFile(target) as z: parts = {n: z.read(n) for n in z.namelist()}
+    sheet = E.fromstring(parts["xl/worksheets/sheet1.xml"]); first = sheet.find("s:sheetData/s:row[@r='2']", ns)
+    for address, value in (("F2", "Answered"), ("G2", "=1+1"), ("H2", "Owner")):
+        cell = first.find(f"s:c[@r='{address}']", ns); cell.clear(); cell.attrib.update(r=address, t="inlineStr")
+        E.SubElement(E.SubElement(cell, tag + "is"), tag + "t").text = value
+    parts["xl/worksheets/sheet1.xml"] = E.tostring(sheet)
+    with ZipFile(target, "w") as z:
+        for n, data in parts.items(): z.writestr(n, data)
+    plan.write_text("---\nsection: 1|b\nsection: 1|a\n---\n")
+    a.write_text(a.read_text().replace("First.", "First, clarified.") + "\n---\nnumber: 44\nanchor: 「」\ncontent: New.\nsources:\n")
+    word = Document(cli.export_docx(tmp_path))
+    with ZipFile(target) as z:
+        sheet = E.fromstring(z.read("xl/worksheets/sheet1.xml"))
+        rows = [[c.findtext("s:v", namespaces=ns) if c.get("t") == "n" else "".join(t.text or "" for t in c.findall(".//s:t", ns)) for c in row] for row in sheet.findall("s:sheetData/s:row", ns)]
+        assert b"<f>" not in z.read("xl/worksheets/sheet1.xml")
+    assert [r[0] for r in rows[1:]] == ["30", "11", "44"]
+    assert rows[2][5:] == ["Answered", "=1+1", "Owner"] and rows[3][5:] == ["Open", "", ""]
+    assert [c.text.split("\n", 1)[0] for c in word.comments] == ["Item 30", "Item 11", "Item 44"]
+    previous = target.read_bytes(); a.write_text(a.read_text() + "\n---\nnumber: 55\nanchor: 「」\ncontent: Pending.\nsources:\n")
+    replace = Path.replace
+    def locked(self, destination):
+        if Path(destination) == target: raise PermissionError("Workbook is open")
+        return replace(self, destination)
+    with monkeypatch.context() as context:
+        context.setattr(Path, "replace", locked)
+        with pytest.raises(PermissionError, match="Workbook is open"): cli.export_docx(tmp_path)
+    assert target.read_bytes() == previous
+
+
+def test_export_sizes_columns_and_merges_categories(tmp_path):
+    from docx.shared import Mm, Pt
+    sections = tmp_path / "work/sections"; sections.mkdir(parents=True)
+    explanation = "说明文字，保持来源与取值依据。" * 12
+    (sections / "demo.md").write_text(
+        "# Table\n\n| 分类 | 指标 | 分级 | 基本分值范围 | 取值 | 权重 | 评估分值 | 说明 |\n"
+        "| --- | --- | --- | --- | ---: | ---: | ---: | --- |\n"
+        f"| X1 建设规模 [design.pdf, page 1] | X11 高度 | 条件一 | 50~74 | 65.4 | 0.17 | 11.12 | {explanation} |\n"
+        f"| X1 建设规模 [design.pdf, page 1] | X12 坡率 | 条件二 | 25~49 | 30 | 0.11 | 3.30 | {explanation} [design.pdf, page 2] |\n"
+        f"| X2 地质 | X21 岩性 | 条件三 | 75~100 | 75 | 0.14 | 10.50 | {explanation} |\n")
+    doc = Document(cli.export_docx(tmp_path)); table = doc.tables[0]
+    widths = [c.width for c in table.columns]
+    assert widths[-1] > 3 * max(widths[4:7]) and len(set(widths)) > 1
+    section = doc.sections[0]
+    assert sum(widths) <= section.page_width - section.left_margin - section.right_margin + Mm(1)
+    assert table.cell(1, 0)._tc is table.cell(2, 0)._tc
+    assert table.cell(2, 0)._tc is not table.cell(3, 0)._tc
+    xml_text = "".join(table._tbl.xpath(".//w:t/text()"))
+    assert xml_text.count("X1 建设规模") == 1 and table.cell(1, 4).text == "65.4"
+    assert len(doc.comments) == 3
+    assert len(doc.element.xpath(".//w:commentRangeStart")) == len(doc.element.xpath(".//w:commentRangeEnd")) == 3
+    assert table.rows[0]._tr.xpath("./w:trPr/w:tblHeader")
+    assert doc.styles["Table Text"].font.size == Pt(10.5)
+    source = sections / "demo.md"
+    source.write_text(source.read_text() + "\n\n| 项目 | 空值 |\n| --- | --- |\n| A | / |\n| B | / |\n")
+    assert Document(cli.export_docx(tmp_path)).tables[1].cell(1, 1).text == "/"
+
+
+def test_export_client_fields_and_agent_order(tmp_path):
+    from zipfile import ZipFile
+    from xml.etree import ElementTree as E
+    template = tmp_path / "commission/template"; template.mkdir(parents=True)
+    (template / "settings.txt").write_text("xlsx_file: client.xlsx\nsheet_columns: Id|Section|Object|Question|Requested|Effect|Sources|Status|Answer|Responder\nsheet_fields: number|section|object|question|required|effect|sources|status|answer|responder\nsheet_widths: 8|28|42|70|60|70|64|14|60|22\nsheet_sort: rank\nsheet_sort_default: 4\nanswers_file: commission/answers.txt\nanswer_author: Client\n")
+    (tmp_path / "commission/answers.txt").write_text("9: Confirmed value.\n")
+    sections = tmp_path / "work/sections"; sections.mkdir(parents=True)
+    (sections / "item.md").write_text("# Slope\n\nA body sentence.")
+    clar = tmp_path / "work/clarifications"; clar.mkdir()
+    text = ""
+    for number, rank, effect in ((101, "3", "The word grade appears but this is descriptive."), (77, "", ""), (9, "2", "Score only."), (5, "1", "Grade may change.")):
+        if text: text += "\n---\n"
+        text += f"number: {number}\nanchor: 「A body sentence.」\ncontent: Internal process detail {number}.\nsources: Evidence\nobject: Client slope\nquestion: {'Please confirm the height.' if rank else ''}\nrequired: Drawing\neffect: {effect}\nrank: {rank}\n"
+        if number == 5: text += "status: Confirmed\n"
+    (clar / "item.md").write_text(text)
+    word = Document(cli.export_docx(tmp_path))
+    with ZipFile(tmp_path / "out/client.xlsx") as z:
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        sheet = E.fromstring(z.read("xl/worksheets/sheet1.xml"))
+        rows = [[c.findtext("s:v", namespaces=ns) if c.get("t") == "n" else "".join(t.text or "" for t in c.findall(".//s:t", ns)) for c in row] for row in sheet.findall("s:sheetData/s:row", ns)]
+        assert sheet.find("s:autoFilter", ns).get("ref") == "A1:J5"
+    assert [r[0] for r in rows[1:]] == ["5", "9", "101", "77"]
+    assert all(len(r) == 10 for r in rows) and all(r[2] == "Client slope" for r in rows[1:])
+    assert rows[1][3] == "Please confirm the height." and rows[-1][3] == rows[-1][5] == ""
+    assert rows[2][7:] == ["Open", "Confirmed value.", "Client"]
+    assert rows[1][7] == "Confirmed"
+    assert "Internal process" not in str(rows)
+    assert len(word.comments) == len(rows) - 1 == 4
+    assert all("Internal process detail" in c.text for c in word.comments)

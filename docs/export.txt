@@ -1,0 +1,57 @@
+Export contract
+
+The CLI export command is offline. It renders data; it does not choose scores,
+detect missing information or assign clarification numbers.
+
+commission/template/settings.txt overrides packaged English defaults.
+commission/template/reference.docx overrides the packaged generic reference.
+Styles and header layout belong to the reference. Header/footer text tokens
+{{project}} and {{title}} are replaced from the plan; no particular layout is
+required. Missing template files use the generic defaults.
+Text fields accept \n for a line break and \u0020 for a trailing space.
+
+work/plan.md starts with --- frontmatter, for example:
+---
+title: Example document
+project: Example project
+section: 1|overview
+section: 1|assessment
+section: 2|item-a
+---
+The human-readable plan follows. section lines explicitly give order, heading
+level and the Markdown filename stem. With no declared order, Markdown files in
+work/sections are rendered in filename order.
+
+work/clarifications/<stem>.md contains blocks separated by a line with ---:
+number: 29
+anchor: 「Exact body sentence.」
+content: Full comment text.
+sources: Evidence references.
+object: Client's item name
+question: One direct client question.
+required: Settling document or value.
+effect: Quantified effect, or description only.
+rank: 1
+
+The author supplies stable numbers and rank. Code neither allocates IDs nor
+infers impact. Empty/unmatched anchors fall back to the section heading.
+Rank meanings belong to the authoring skill, not the renderer. Converted items
+can leave question, required, effect and rank empty.
+
+sheet_columns supplies labels; sheet_fields selects the corresponding data.
+sheet_sort selects a numeric field; blanks use sheet_sort_default.
+Client templates omit content from the sheet; it remains in Word comments.
+Existing status/answer/responder values are retained by number and matching
+header labels. An optional answers_file (N: answer) overrides matching answers
+with answer_author, leaving status unchanged. No completion is inferred.
+An explicit status supplied in the item overrides the retained/default status;
+the renderer does not derive a status from the answer's content.
+
+The Markdown subset supports headings, paragraphs, simple lists, emphasis,
+pipe tables and inline citations. Formulas remain text; nested lists, fenced
+blocks and image embedding are not implemented. Caption recognition, numbering,
+labels, prefixes, font size and table settings come from the template settings.
+Workbook output currently supports up to 26 columns.
+
+A future template-supplied named-block renderer would join the block dispatch
+in _section. No dynamic template code loading or plugin interface exists now.
