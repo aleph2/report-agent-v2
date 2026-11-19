@@ -103,15 +103,18 @@ def test_cli_write_only(tmp_path, monkeypatch):
     assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
 
 
-def test_model_from_current_dotenv(tmp_path, monkeypatch):
+@pytest.mark.parametrize("constructed", [False, True])
+def test_model_from_current_dotenv(tmp_path, monkeypatch, constructed):
     monkeypatch.chdir(tmp_path)
     for name in ("MODEL_NAME", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env").write_text("MODEL_NAME=env-model\nOPENAI_BASE_URL=https://llm.example/v1\nOPENAI_API_KEY=offline-key\n")
     settings = {}
-    monkeypatch.setattr(models, "init_chat_model", lambda **kwargs: settings.update(kwargs) or "model")
-    assert models.make_model() == "model"
-    assert settings == dict(model="env-model", model_provider="openai", base_url="https://llm.example/v1", api_key="offline-key", temperature=0.0)
+    original = models.init_chat_model
+    monkeypatch.setattr(models, "init_chat_model", lambda **kwargs: settings.update(kwargs) or (original(**kwargs) if constructed else "model"))
+    model = models.make_model()
+    assert all(client.default_headers["Connection"] == "close" and not client._client._transport._pool._http2 for client in (model.root_client, model.root_async_client)) if constructed else model == "model"
+    assert settings == dict(model="env-model", model_provider="openai", base_url="https://llm.example/v1", api_key="offline-key", temperature=0.0, default_headers={"Connection": "close"})
     for name in ("MODEL_NAME", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env").write_text("MODEL_NAME=env-model\n")
