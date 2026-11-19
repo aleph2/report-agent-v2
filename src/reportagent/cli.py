@@ -19,11 +19,13 @@ GATHER_BUDGET_FRACTION = 0.6
 def main():
     parser = argparse.ArgumentParser(prog="reportagent")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("ingest", "export", "plan", "run"):
+    for name in ("ingest", "export", "plan", "run", "review"):
         command = commands.add_parser(name)
         command.add_argument("case", type=Path)
-        if name in ("plan", "run"):
+        if name in ("plan", "run", "review"):
             command.add_argument("--max-tokens", type=int, required=True)
+        if name == "review":
+            command.add_argument("--section", required=True)
         if name == "run":
             command.add_argument("--write-only", action="store_true")
             command.add_argument("--section")
@@ -38,6 +40,10 @@ def main():
     folder.mkdir(parents=True, exist_ok=True)
     if args.command == "plan":
         phases = (("plan", "Plan the report requested in /commission/."),)
+    elif args.command == "review":
+        name = args.section
+        phases = (("review", f"Review section {name}. "
+                             f"Save the review to /work/reviews/{name}.md."),)
     elif args.section:
         name = args.section
         requirements = f"Its required contents are under heading ## {name} in /work/plan.md."
@@ -64,7 +70,7 @@ def main():
                 print(f"No notes for {args.section or 'requested section'}; writing skipped.")
                 continue
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
-        cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather"))
+        cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "review"))
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
         state = {"messages": [HumanMessage(content=prompt)]}
         log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")

@@ -41,10 +41,11 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     monkeypatch.setattr(cli, "make_model", lambda: made.append(True) or model)
     middleware = cli.TokenCapMiddleware
     monkeypatch.setattr(cli, "TokenCapMiddleware", lambda limit, **kw: limits.append(limit) or middleware(limit, **kw))
-    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path)])
-    with pytest.raises(SystemExit) as missing:
-        cli.main()
-    assert missing.value.code == 2 and not made
+    for required in (["run"], ["review"], ["review", "--section", "01-hydrology"], ["review", "--max-tokens", "100"]):
+        monkeypatch.setattr(sys, "argv", ["reportagent", *required, str(tmp_path)])
+        with pytest.raises(SystemExit) as missing:
+            cli.main()
+        assert missing.value.code == 2 and not made
     for args in (("ingest", str(tmp_path)), ("run", str(tmp_path), "--max-tokens", str(cap))):
         monkeypatch.setattr(sys, "argv", ["reportagent", *args])
         cli.main()
@@ -163,15 +164,18 @@ def test_failed_text_continues_and_png_reaches_model(tmp_path):
 
 def test_plan_then_named_section(tmp_path, monkeypatch):
     section = "01-hydrology"
-    outputs = {"/work/plan.md": f"## {section}\nDrainage. [guide.pdf, page 1]\n", f"/work/notes/{section}.md": "Evidence.", f"/work/sections/{section}.md": "# Hydrology"}
+    outputs = {"/work/plan.md": f"## {section}\nDrainage. [guide.pdf, page 1]\n", f"/work/notes/{section}.md": "Evidence.",
+               f"/work/sections/{section}.md": "# Hydrology", f"/work/reviews/{section}.md": "method | Hydrology | Missing band. [guide.pdf, page 1] | must-fix"}
     model = ScriptedModel(responses=[reply for path, text in outputs.items() for reply in (call("write_file", file_path=path, content=text), AIMessage(content="Saved."))])
     monkeypatch.setattr(cli, "make_model", lambda: model)
-    for command in (["plan", str(tmp_path), "--max-tokens", "10"], ["run", str(tmp_path), "--max-tokens", "10", "--section", section]):
-        monkeypatch.setattr(sys, "argv", ["reportagent", *command])
+    for command in ("plan", "run", "review"):
+        section_args = ["--section", section] if command != "plan" else []
+        monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "10", *section_args])
         cli.main()
     assert {path: (tmp_path / path.lstrip("/")).read_text() for path in outputs} == outputs
     logs = {p.stem.rsplit("-", 1)[1]: [json.loads(line) for line in p.read_text().splitlines()] for p in (tmp_path / "work/runs").glob("*.jsonl")}
-    assert set(logs) == {"plan", "gather", "write"} and logs["plan"][0]["content"] == "Plan the report requested in /commission/."
+    assert set(logs) == {"plan", "gather", "write", "review"} and logs["plan"][0]["content"] == "Plan the report requested in /commission/."
+    assert logs["review"][0]["content"] == f"Review section {section}. Save the review to /work/reviews/{section}.md."
     for phase, folder in (("gather", "notes"), ("write", "sections")):
         prompt = logs[phase][0]["content"]
         assert section in prompt and f"## {section}" in prompt and "/work/plan.md" in prompt and f"/work/{folder}/{section}.md" in prompt and (phase != "write" or "/commission/" not in prompt)
@@ -223,20 +227,22 @@ def test_pdf_timeout_continues(tmp_path, monkeypatch):
     assert (root / "two/page-001.png").exists() and (root / "two/page-002.txt").read_text() == "Second page"
 
 
-
-def test_plan_receives_half_budget_note(tmp_path, monkeypatch):
+@pytest.mark.parametrize("command", ["plan", "review"])
+def test_plan_and_review_receive_half_budget_note(tmp_path, monkeypatch, command):
     (tmp_path / "commission").mkdir()
     (tmp_path / "commission/brief.md").write_text("Plan one synthetic section.")
     plan = "## 01-synthetic\nSynthetic guidance."
-    replies = [call("read_file", file_path="/commission/brief.md"), call("read_file", file_path="/commission/brief.md"), call("write_file", file_path="/work/plan.md", content=plan), AIMessage(content="Saved.")]
+    target = "/work/plan.md" if command == "plan" else "/work/reviews/01-synthetic.md"
+    replies = [call("read_file", file_path="/commission/brief.md"), call("read_file", file_path="/commission/brief.md"), call("write_file", file_path=target, content=plan), AIMessage(content="Saved.")]
     model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n)}) for reply, n in zip(replies, [2, 2, 1, 1])])
     monkeypatch.setattr(cli, "make_model", lambda: model)
-    monkeypatch.setattr(sys, "argv", ["reportagent", "plan", str(tmp_path), "--max-tokens", "10"])
+    section_args = ["--section", "01-synthetic"] if command == "review" else []
+    monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "10", *section_args])
     cli.main()
     messages = [json.loads(line) for line in next((tmp_path / "work/runs").glob("*.jsonl")).read_text().splitlines()]
     notes = [m for m in messages if m["type"] == "human" and m["content"].startswith("You have used")]
     assert len(notes) == 1 and notes[0]["content"].startswith("You have used 5 of 10 tokens.")
-    assert messages[messages.index(notes[0]) - 1]["type"] == "tool" and (tmp_path / "work/plan.md").read_text() == plan
+    assert messages[messages.index(notes[0]) - 1]["type"] == "tool" and (tmp_path / target.lstrip("/")).read_text() == plan
 
 
 @pytest.mark.parametrize("matching", [False, True])
