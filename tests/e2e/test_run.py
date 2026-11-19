@@ -338,7 +338,7 @@ def test_cli_citation_check(tmp_path, monkeypatch, complete):
     monkeypatch.setattr(cli, "make_model", lambda: pytest.fail("check must not construct a model"))
     monkeypatch.setattr(sys, "argv", ["reportagent", "check", str(tmp_path), "--section", "demo"])
     cli.main()
-    report = (tmp_path / "work/checks/demo.md").read_text()
+    report = (tmp_path / "work/checks/demo.md").read_text().split("## Findings\n", 1)[1].split("\nFindings:", 1)[0].strip()
     assert "sections/demo.md:2" in report and "23" in report
     assert all(f"sections/demo.md:{n}:" in report for n in (3, 4, 5, 6, 9, 11, 12, 13))
     assert all(f"sections/demo.md:{n}:" not in report for n in (1, 7, 8, 10, 14))
@@ -349,7 +349,7 @@ def test_cli_citation_check(tmp_path, monkeypatch, complete):
     assert all(line.strip() and ".md:" in line and " | " in line for line in report.splitlines())
 
 
-def test_verified_citations_produce_empty_check(tmp_path):
+def test_verified_citations_produce_zero_findings(tmp_path):
     source = tmp_path / "sources"; source.mkdir()
     (source / "guide.pdf").touch(); (source / "guide").mkdir()
     (source / "guide/page-001.txt").write_text("42.6 m")
@@ -357,7 +357,54 @@ def test_verified_citations_produce_empty_check(tmp_path):
     (sections / "demo.md").write_text("Height ４２．６ m [guide.pdf, page 1].")
     notes = tmp_path / "work/notes"; notes.mkdir()
     (notes / "demo.md").touch()
-    assert cli.check(tmp_path, "demo").read_text() == ""
+    assert cli.check(tmp_path, "demo").read_text().endswith("Findings: total=0; shown=0; omitted=0\n")
+
+
+def test_check_clarification_numbers_and_previous_citations(tmp_path):
+    source = tmp_path / "sources"; source.mkdir()
+    (source / "guide.pdf").touch(); (source / "guide").mkdir()
+    (source / "guide/page-001.txt").write_text("42.6")
+    (source / "guide/page-002.txt").write_text("88")
+    sections = tmp_path / "work/sections"; sections.mkdir(parents=True)
+    (sections / "demo.md").write_text("\n".join([
+        "Height 42.6，见第79项 [guide.pdf, page 1]。",
+        "Height 42.6, item 80 [同上]。",
+        "Height 42.6，见第81、82项 [同上页]。",
+        "Value 88, item 83 [同上, page 2]。",
+        "Height 42.6 [guide.pdf, page 1；同上页]。",
+        "Wrong 999，见第84项 [同上页]。",
+        "Height 42.6 [guide.pdf, page 1] [澄清答复, item 93]。",
+    ]))
+    notes = tmp_path / "work/notes"; notes.mkdir()
+    (notes / "demo.md").write_text("Read [guide.pdf, page 1]\n未见 [同上页]")
+    report = cli.check(tmp_path, "demo").read_text()
+    assert "number 999 not found" in report
+    assert all(f"number {n} not found" not in report for n in (79, 80, 81, 82, 83, 84, 93))
+    assert "source file not found" not in report
+    assert "number 42.6 not found" not in report and "number 88 not found" not in report
+
+
+def test_check_lists_sources_before_capped_findings(tmp_path):
+    source = tmp_path / "sources"; source.mkdir()
+    (source / "guide.pdf").touch(); (source / "guide").mkdir()
+    (source / "guide/page-001.txt").write_text("42.6")
+    sections = tmp_path / "work/sections"; sections.mkdir(parents=True)
+    (sections / "demo.md").write_text("\n".join([
+        "| X11 Height | 42.6 [guide.pdf, page 1] |",
+        "| X12 Slope | unconfirmed |",
+        "未列、未见且缺数据 [同上页]。",
+        *["Wrong 999 [guide.pdf, page 1]。"] * 45,
+    ]))
+    notes = tmp_path / "work/notes"; notes.mkdir()
+    (notes / "demo.md").write_text("未提供 [guide.pdf, page 1]")
+    report = cli.check(tmp_path, "demo").read_text()
+    top, rest = report.split("## Findings\n", 1)
+    assert "indicator X11" in top and "[guide.pdf, page 001]" in top
+    assert "indicator X12 | (no file/page citation)" in top
+    assert all(f"absence {phrase}" in top for phrase in ("未列", "未见", "缺", "未提供"))
+    findings = rest.split("\nFindings:", 1)[0].strip().splitlines()
+    assert len(findings) == 40
+    assert "Findings: total=46; shown=40; omitted=6" in rest
 
 
 

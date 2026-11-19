@@ -24,17 +24,24 @@ GATHER_BUDGET_FRACTION = 0.6
 
 
 PAGE = re.compile(r"pages?\s*(\d+)(?:\s*[-–—~～]\s*(?:pages?\s*)?(\d+))?", re.I)
+ABSENCE = re.compile(r"\b(?:missing|absent|not\s+found)\b|未(?:列|见|提供|找到|检索到|发现)|缺|不存在|无直接依据", re.I)
 
 
-def _citations(text):
+def _citations(text, previous=None):
+    if previous is None:
+        previous = {}
     for bracket in re.finditer(r"\[([^\]\n]+)\]", text):
         filename, offset = "", bracket.start() + 1
         for part in re.split("[;；]", bracket[1]):
             matches = list(PAGE.finditer(part))
-            if matches:
-                prefix = part[:matches[0].start()].strip().rstrip(",，").strip()
-                filename = prefix or filename
-                yield offset, filename, [(int(m[1]), int(m[2] or m[1])) for m in matches], {offset + m.start() for m in matches}
+            prefix = part[:matches[0].start()] if matches else part
+            prefix = prefix.strip().rstrip(",，").strip()
+            repeated = prefix in ("同上", "同上页")
+            if matches or repeated:
+                filename = previous.get("filename", "") if repeated else prefix or filename
+                ranges = [(int(m[1]), int(m[2] or m[1])) for m in matches] if matches else previous.get("ranges", [])
+                previous.update(filename=filename, ranges=ranges)
+                yield offset, filename, ranges, {offset + m.start() for m in matches}
             offset += len(part) + 1
 
 
@@ -83,6 +90,21 @@ def check(case, name):
     case, findings = Path(case), []
     sources = (case / "sources").resolve()
     page_files, page_numbers = {}, {}
+    indicators, inventory = {}, []
+
+    def listed_pages(text, refs, location):
+        # shortcut: recognise Xnn labels in pipe tables; extend for another indicator syntax.
+        indicator = re.search(r"\bX\d{2}\b", text) if text.lstrip().startswith("|") else None
+        labels = [f"absence {match[0]}" for match in ABSENCE.finditer(text)]
+        citations = "; ".join(
+            f"[{filename or '(unspecified)'}, " + ", ".join(f"page {a:03d}" + (f"–{b:03d}" if a != b else "") for a, b in ranges) + "]"
+            for _, filename, ranges, _ in refs
+        ) or "(no file/page citation)"
+        if indicator:
+            entries = indicators.setdefault(indicator[0], [])
+            if refs:
+                entries.append(f"{location} | {citations}")
+        inventory.extend(f"- {label} | {location} | {citations}" for label in labels)
 
     def pages(filename, ranges, location):
         if filename not in page_files:
@@ -106,9 +128,11 @@ def check(case, name):
         return sorted(selected)
 
     section_path = f"/work/sections/{name}.md"
+    previous = {}
     for line_number, line in enumerate((case / section_path.lstrip("/")).read_text(encoding="utf-8").splitlines(), 1):
+        listed_pages(line, list(_citations(line, previous.copy())), f"{section_path}:{line_number}:1")
         for sentence in re.finditer(r".+?(?:[。！？!?]|\.(?=\s|$)|$)", line):
-            refs = list(_citations(sentence[0]))
+            refs = list(_citations(sentence[0], previous))
             if not refs:
                 continue
             evidence = set()
@@ -120,17 +144,20 @@ def check(case, name):
                         page_numbers[page] = _numbers(text) | _numbers(re.sub(r"\s+", "", text))
                     evidence.update(page_numbers[page])
             body = re.sub(r"\[[^\]\n]*\]", "", sentence[0])
+            body = re.sub(r"第\s*\d+(?:\s*[、，,～~–—-]\s*\d+)*\s*项|\bitem\s+\d+\b|\bX\d{2}\b", "", body, flags=re.I)
             for number in sorted(_numbers(body) - evidence):
                 findings.append(f"{section_path}:{line_number}:{sentence.start() + 1} | number {number} not found on the cited page texts")
 
     opened = _full_source_reads(case, name)
     # shortcut: recognise explicit absence markers; extend them when new wording appears.
     notes_path = f"/work/notes/{name}.md"
+    previous = {}
     for line_number, line in enumerate((case / notes_path.lstrip("/")).read_text(encoding="utf-8").splitlines(), 1):
-        if (line.lstrip().startswith("#") and not PAGE.search(line)) or not re.search(r"\b(?:missing|absent|not\s+found)\b|未(?:找到|检索到|发现|见|提供)|缺失|缺少|不存在|无直接依据", line, re.I):
-            continue
+        refs = list(_citations(line, previous))
         location = f"{notes_path}:{line_number}:1"
-        refs = list(_citations(line))
+        listed_pages(line, refs, location)
+        if (line.lstrip().startswith("#") and not PAGE.search(line)) or not ABSENCE.search(line):
+            continue
         positions = set()
         for _, filename, ranges, offsets in refs:
             positions.update(offsets)
@@ -144,7 +171,13 @@ def check(case, name):
             findings.append(f"{location} | no explicit file/page citation for absence wording")
     output = case / f"work/checks/{name}.md"
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("".join(line + "\n" for line in findings), encoding="utf-8")
+    inventory = [f"- indicator {label} | " + ("; ".join(entries) or "(no file/page citation)") for label, entries in indicators.items()] + inventory
+    output.write_text(
+        "# Source pages to review\n" + "\n".join(inventory) + "\n\n## Findings\n"
+        + "".join(line + "\n" for line in findings[:40])
+        + f"\nFindings: total={len(findings)}; shown={min(40, len(findings))}; omitted={max(0, len(findings) - 40)}\n",
+        encoding="utf-8",
+    )
     return output
 
 
