@@ -1,23 +1,27 @@
+HELD PROPOSAL: pending the owner's decision. Do not merge or run this branch.
+
 Revision of one existing section
 
 First refresh its mechanical source-page list (offline):
   python -m reportagent check CASE --section NAME
 With a separately authorised live-run budget:
   python -m reportagent revise CASE --section NAME --max-tokens 300000
-NAME is the section file stem, including spaces and Chinese characters if present.
+NAME is the literal file stem, including spaces and Chinese characters if present.
 
 Fresh contexts run in order: verify-sources (80k), review (100k), clarify (40k),
 revise (80k). Each cap is also limited by the remaining CLI budget; unused
 allocation cannot increase another phase's maximum. Usage is counted after
 responses, so a single response can still cross a cap, as in other commands.
 
-verify-sources receives the check file's top source list as its first message,
-then saves work/reviews/NAME-sources.md. review uses that note and saves
-work/reviews/NAME.md. clarify completes work/clarifications/NAME.md, then
-revise edits work/sections/NAME.md. Packaged phase skills are preloaded.
+verify-sources receives the check top list as its first message, as data.
+It reads only sources/, index.md and its own work/checks/NAME.md;
+it writes work/reviews/NAME-sources.md. review reads that note first and writes
+only work/reviews/NAME.md. clarify reads its own review, section, clarifications
+and commission/澄清答复.md, and writes only work/clarifications/NAME.md.
+revise can only edit the existing work/sections/NAME.md. All other writes are
+refused; delete and execute are absent. Review/revise retain their existing
+read access. Packaged skill text is preloaded without widening case read access.
 The final-save notice names write_file or edit_file for the current phase.
-These are phase assignments, not enforced filesystem permissions: the proposed
-path restrictions and edit_file-only enforcement are held for the owner's decision.
 
 Each phase saves its full transcript in work/runs/. Standalone review runs only
 the review phase. plan/run, including --write-only, are for initial drafting;

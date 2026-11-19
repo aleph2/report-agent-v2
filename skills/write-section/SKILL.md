@@ -17,7 +17,7 @@ For an item with scope criteria, begin with a short 适用性 paragraph: the cri
 Where sources disagree, choose the value the commission's priority rule gives, say so, and show the other value's effect only as a sensitivity check.
 Apply that method exactly as those notes record it: its indicators, weight rule and grade thresholds.
 If /work/reviews/<name>.md exists, read it too and fix every must-fix finding, citing the evidence it gives.
-For revisions, use edit_file on the paragraphs and table rows concerned by the review's must-fix findings, using the completed clarifications.
+For revisions, change the paragraphs and table rows concerned by the review's must-fix findings, using the completed clarifications.
 Write connected report prose, with （1）（2） numbering where a list is needed, keeping each fact's [file, page] citation.
 Use Markdown with one # heading; use ## and ### for subsections as needed.
 For a new section, save /work/sections/<nn>-<name>.md and record every MISSING or unresolved item in /work/clarifications/<name>.md using the clarify-section skill's fields and numbering rules.

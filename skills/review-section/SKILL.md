@@ -18,5 +18,3 @@ Check these in order:
 For coverage and structure only, you may read the matching part of /reference/ to see what a complete section of this kind contains. Do not take any value from it or quote reference facts in the review.
 Write each finding as one line: label (content / method / process), location, what is wrong, evidence [file, page], and must-fix or note.
 End with a short list titled "可推广经验": general one-line lessons with no case facts.
-Save the review to /work/reviews/<name>.md, where <name> is this section's file stem.
-Do not edit the section.

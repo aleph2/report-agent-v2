@@ -196,6 +196,8 @@ def main():
             command.add_argument("--write-only", action="store_true")
             command.add_argument("--section")
     args = parser.parse_args()
+    if args.command in ("review", "revise") and (not args.section or args.section in (".", "..") or re.search(r"[/\\*?\[\]{}]", args.section)):
+        parser.error("--section must be a literal file stem, without path separators or glob characters")
     if args.command in ("ingest", "export"):
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
@@ -265,7 +267,7 @@ def main():
         resume = None
         try:
             agent = build_agent(args.case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
-                                phase=phase if phase in REVISION_CAPS else None)
+                                phase=phase if phase in REVISION_CAPS else None, section=getattr(args, "section", None))
             # Flush each checkpoint before advancing; avoids queued background writes.
             try:
                 for state in agent.stream(state, config=config, stream_mode="values", durability="sync"):

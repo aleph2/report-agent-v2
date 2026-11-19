@@ -34,11 +34,41 @@ def test_revision_phase_save_notice(tmp_path, phase, target, tool):
     costs = dict(input_tokens=30, output_tokens=0, total_tokens=30)
     model = ScriptedModel(responses=[call("read_file", file_path="/index.md").model_copy(update={"usage_metadata": costs}),
                                     allowed.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)})])
-    result = cli.build_agent(tmp_path, model, phase=phase,
+    result = cli.build_agent(tmp_path, model, phase=phase, section="demo",
                              middleware=[TokenCapMiddleware(100, phase=phase)]).invoke({"messages": [("user", "Save.")]})
     notice = next(m.content for m in result["messages"] if m.type == "human" and "Token budget reached" in m.content)
     assert phase in notice and tool in notice and "one write" not in notice
     assert file.read_text() == "Saved" and result["total_tokens"] == 31
+
+
+@pytest.mark.parametrize("phase,target,tool", [
+    ("verify-sources", "reviews/demo-sources", "write_file"),
+    ("review", "reviews/demo", "write_file"),
+    ("clarify", "clarifications/demo", "write_file"),
+    ("revise", "sections/demo", "edit_file"),
+])
+def test_revision_phase_permissions(tmp_path, phase, target, tool):
+    for path in ("sections/demo", "sections/other", "clarifications/demo"):
+        file = tmp_path / f"work/{path}.md"; file.parent.mkdir(parents=True, exist_ok=True); file.write_text("Before")
+    (tmp_path / "sources").mkdir(); (tmp_path / "sources/page.txt").write_text("Source")
+    destination = f"/work/{target}.md"
+    allowed = (call(tool, file_path=destination, old_string="Before", new_string="Saved") if tool == "edit_file"
+               else call(tool, file_path=destination, content="Saved"))
+    replies = [call("edit_file", file_path="/work/sections/other.md", old_string="Before", new_string="Bad"),
+               call("write_file", file_path="/work/sections/other.md", content="Bad")]
+    if phase == "revise":
+        replies.append(call("write_file", file_path=destination, content="Bad"))
+    if phase in ("verify-sources", "clarify"):
+        replies.append(call("read_file", file_path="/work/sections/demo.md" if phase == "verify-sources" else "/sources/page.txt"))
+    model = ScriptedModel(responses=[*replies, allowed, AIMessage(content="Saved.")])
+    with patch.object(ScriptedModel, "_generate", autospec=True, side_effect=ScriptedModel._generate) as generated:
+        result = cli.build_agent(tmp_path, model, phase=phase, section="demo").invoke({"messages": [("user", "Save.")]})
+    tools = [m for m in result["messages"] if m.type == "tool"]
+    assert all(m.status == "error" for m in tools[:-1]) and tools[-1].status == "success"
+    assert (tmp_path / "work/sections/other.md").read_text() == "Before"
+    assert (tmp_path / destination.lstrip("/")).read_text() == "Saved"
+    offered = {t.name for t in generated.call_args_list[0].kwargs["tools"]}
+    assert {"execute", "delete", "task"}.isdisjoint(offered) and ("write_file" in offered) == (phase != "revise")
 
 
 @pytest.mark.parametrize("cap,gather_costs,written", [(100, [1, 1, 1], 4), (6, [1, 1], 3), (4, [1, 1], 2), (3, [3], 0)])
@@ -123,6 +153,10 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
     limits, original = [], cli.TokenCapMiddleware
     monkeypatch.setattr(cli, "make_model", lambda: model)
     monkeypatch.setattr(cli, "TokenCapMiddleware", lambda limit, **kw: limits.append(limit) or original(limit, **kw))
+    for invalid in ("../demo", "demo*", "demo{,other}"):
+        monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", invalid, "--max-tokens", str(budget)])
+        with pytest.raises(SystemExit) as error: cli.main()
+        assert error.value.code == 2 and model.i == 0
     monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", str(budget)])
     cli.main()
     expected, used = [], 0
