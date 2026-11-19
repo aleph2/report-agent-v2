@@ -14,9 +14,10 @@ class TokenCapState(AgentState):
 class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
     state_schema = TokenCapState
 
-    def __init__(self, max_tokens, *, remind=True):
+    def __init__(self, max_tokens, *, remind=True, phase=None):
         self.max_tokens = max_tokens
         self.remind = remind
+        self.phase = phase
 
     def _end(self, total, rule="reported total >= cap"):
         return {"total_tokens": total, "jump_to": "end", "messages": [
@@ -34,8 +35,11 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         previous = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
         last_tokens = ((previous.usage_metadata or {}).get("total_tokens") or 0) if previous else 0
         if total + 3 * last_tokens > self.max_tokens:
+            save = (f"In the {self.phase} phase, save your work now with "
+                    f"{'edit_file' if self.phase == 'revise' else 'write_file'}; do not read anything more."
+                    if self.phase else "Save your work now in one write; do not read anything more.")
             return {"final_save_rule": "reported total + 3 * previous call > cap", "messages": [HumanMessage(
-                content="Token budget reached. Save your work now in one write; do not read anything more."
+                content="Token budget reached. " + save
             )]}
         # Keep pending tool calls and their results together before adding the note.
         if self.remind and total >= self.max_tokens / 2 and not state.get("budget_note_sent"):

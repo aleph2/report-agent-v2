@@ -21,6 +21,7 @@ from .models import make_model
 
 
 GATHER_BUDGET_FRACTION = 0.6
+REVISION_CAPS = {"verify-sources": 80000, "review": 100000, "clarify": 40000, "revise": 80000}
 
 
 PAGE = re.compile(r"pages?\s*(\d+)(?:\s*[-–—~～]\s*(?:pages?\s*)?(\d+))?", re.I)
@@ -184,17 +185,19 @@ def check(case, name):
 def main():
     parser = argparse.ArgumentParser(prog="reportagent")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("ingest", "export", "plan", "run", "review", "check"):
+    for name in ("ingest", "export", "plan", "run", "review", "revise", "check"):
         command = commands.add_parser(name)
         command.add_argument("case", type=Path)
-        if name in ("plan", "run", "review"):
+        if name in ("plan", "run", "review", "revise"):
             command.add_argument("--max-tokens", type=int, required=True)
-        if name in ("review", "check"):
+        if name in ("review", "revise", "check"):
             command.add_argument("--section", required=True)
         if name == "run":
             command.add_argument("--write-only", action="store_true")
             command.add_argument("--section")
     args = parser.parse_args()
+    if args.command in ("review", "revise") and (not args.section or args.section in (".", "..") or re.search(r"[/\\*?\[\]{}]", args.section)):
+        parser.error("--section must be a literal file stem, without path separators or glob characters")
     if args.command in ("ingest", "export"):
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
@@ -208,6 +211,18 @@ def main():
     folder.mkdir(parents=True, exist_ok=True)
     if args.command == "plan":
         phases = (("plan", "Plan the report requested in /commission/."),)
+    elif args.command == "revise":
+        name = args.section
+        phases = (
+            ("verify-sources", f"verify-sources for section {name}: read /work/checks/{name}.md. "
+             f"Save the source checks to /work/reviews/{name}-sources.md."),
+            ("review", f"review section {name}: read /work/reviews/{name}-sources.md first. "
+             f"Save the review to /work/reviews/{name}.md."),
+            ("clarify", f"clarify section {name}: complete /work/clarifications/{name}.md "
+             f"from /work/reviews/{name}.md, /work/sections/{name}.md and /commission/澄清答复.md."),
+            ("revise", f"revise section {name} using /work/reviews/{name}.md and the completed "
+             f"/work/clarifications/{name}.md. Save edits to /work/sections/{name}.md."),
+        )
     elif args.command == "review":
         name = args.section
         phases = (("review", f"Review section {name}. "
@@ -238,14 +253,18 @@ def main():
                 print(f"No notes for {args.section or 'requested section'}; writing skipped.")
                 continue
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
-        cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "review"))
+        if phase in REVISION_CAPS:
+            limit = min(limit, REVISION_CAPS[phase])
+        cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
+                                 phase=phase if phase in REVISION_CAPS else None)
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
         state = {"messages": [HumanMessage(content=prompt)]}
         log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
         config = {"configurable": {"thread_id": log.stem}}
         resume = None
         try:
-            agent = build_agent(args.case, model, middleware=[cap, calls], checkpointer=InMemorySaver())
+            agent = build_agent(args.case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
+                                phase=phase if phase in REVISION_CAPS else None, section=getattr(args, "section", None))
             # Flush each checkpoint before advancing; avoids queued background writes.
             try:
                 for state in agent.stream(state, config=config, stream_mode="values", durability="sync"):

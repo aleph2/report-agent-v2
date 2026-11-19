@@ -2,8 +2,7 @@
 name: review-section
 description: Review a drafted section against its method, cited sources and scope, and save findings without editing it.
 ---
-Read /work/checks/<name>.md first; open every source page in its top list in full before reading other report files.
-Finish those source checks before writing findings; identify unresolved citations rather than treating them as verified.
+Read /work/reviews/<name>-sources.md first; use its page checks and identify unresolved citations rather than treating them as verified.
 Derived calculations (weights, products, totals) need no source page.
 Read the section, its notes, its heading in /work/plan.md, and the notes of the section whose method it applies (03-评估流程和方法.md for slopes).
 Read this section's /work/clarifications/<name>.md and, if present, /commission/澄清答复.md; check matching numbers and answers, and check that the body has no 缺失与待补充事项 section or references to that list.
@@ -19,5 +18,3 @@ Check these in order:
 For coverage and structure only, you may read the matching part of /reference/ to see what a complete section of this kind contains. Do not take any value from it or quote reference facts in the review.
 Write each finding as one line: label (content / method / process), location, what is wrong, evidence [file, page], and must-fix or note.
 End with a short list titled "可推广经验": general one-line lessons with no case facts.
-Save the review to /work/reviews/<name>.md, where <name> is this section's file stem.
-Do not edit the section.
