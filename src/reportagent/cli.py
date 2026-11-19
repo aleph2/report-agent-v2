@@ -1,7 +1,12 @@
 import argparse
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
+
+from httpx import NetworkError, RemoteProtocolError, TimeoutException
+from langgraph.checkpoint.memory import InMemorySaver
+from openai import APIConnectionError
 
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.messages import HumanMessage
@@ -74,12 +79,28 @@ def main():
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
         state = {"messages": [HumanMessage(content=prompt)]}
         log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
+        config = {"configurable": {"thread_id": log.stem}}
+        resume = None
         try:
-            agent = build_agent(args.case, model, middleware=[cap, calls])
-            for state in agent.stream(state, stream_mode="values"):
-                pass
+            agent = build_agent(args.case, model, middleware=[cap, calls], checkpointer=InMemorySaver())
+            # Flush each checkpoint before advancing; avoids queued background writes.
+            try:
+                for state in agent.stream(state, config=config, stream_mode="values", durability="sync"):
+                    pass
+            except (APIConnectionError, NetworkError, RemoteProtocolError, TimeoutException) as error:
+                state = agent.get_state(config).values
+                resume = (len(state["messages"]), json.dumps({
+                    "type": "resume", "phase": phase, "thread_id": log.stem,
+                    "error": type(error).__name__, "total_tokens": state.get("total_tokens", 0),
+                }))
+                # https://docs.langchain.com/oss/python/langgraph/checkpointers#choose-how-to-continue-a-thread
+                for state in agent.stream(None, config=config, stream_mode="values", durability="sync"):
+                    pass
         finally:
-            log.write_text("".join(message.model_dump_json() + "\n" for message in state["messages"]), encoding="utf-8")
+            lines = [message.model_dump_json() + "\n" for message in state["messages"]]
+            if resume:
+                lines.insert(resume[0], resume[1] + "\n")
+            log.write_text("".join(lines), encoding="utf-8")
             used = state.get("total_tokens", 0)
             total += used
             remaining = max(0, remaining - used)

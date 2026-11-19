@@ -19,7 +19,7 @@ def make_model():
     register_harness_profile(f"openai:{name}", RUN_PROFILE)
     return init_chat_model(
         model=name, model_provider="openai", base_url=os.environ["OPENAI_BASE_URL"],
-        api_key=os.environ["OPENAI_API_KEY"], temperature=0.0,
+        api_key=os.environ["OPENAI_API_KEY"], temperature=0.0, max_retries=0,
         # Close HTTP/1.1 sockets after each response, retaining framework settings.
         # https://www.rfc-editor.org/rfc/rfc9112.html#section-9.6
         # shortcut: use zero pool limits instead if HTTP/2 is enabled.

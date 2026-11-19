@@ -81,7 +81,9 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
         assert not (tmp_path / "work/sections").exists()
 
 
-def test_cli_write_only(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["none", "once", "twice"])
+def test_cli_write_only(tmp_path, monkeypatch, capsys, failure):
+    from httpx import RemoteProtocolError
     (tmp_path / "commission").mkdir(exist_ok=True)
     (tmp_path / "commission/brief.md").write_text("Write the hydrology section.")
     notes = "The site drains east. [one-page.pdf, page 1]"
@@ -91,12 +93,30 @@ def test_cli_write_only(tmp_path, monkeypatch):
     replies = [call("read_file", file_path="/work/notes/hydrology.md"),
                call("write_file", file_path="/work/sections/01-hydrology.md", content=section), AIMessage(content="Done.")]
     model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for m in replies])
+    attempts, original = [], ScriptedModel._generate
+    def generate(self, messages, **kwargs):
+        attempts.append([(m.type, m.content) for m in messages])
+        if (failure != "none" and len(attempts) == 2) or (failure == "twice" and len(attempts) == 3):
+            raise RemoteProtocolError("No response.")
+        return original(self, messages, **kwargs)
+    monkeypatch.setattr(ScriptedModel, "_generate", generate)
     monkeypatch.setattr(cli, "make_model", lambda: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "3", "--write-only"])
-    cli.main()
+    if failure == "twice":
+        with pytest.raises(RemoteProtocolError):
+            cli.main()
+    else:
+        cli.main()
     logs = list((tmp_path / "work/runs").glob("*.jsonl"))
     assert len(logs) == 1 and logs[0].name.endswith("-write.jsonl")
     transcript = [json.loads(line) for line in logs[0].read_text().splitlines()]
+    events = [m for m in transcript if m["type"] == "resume"]
+    assert len(attempts) == (2 if failure == "none" else 3) and len(events) == int(failure != "none")
+    assert failure == "none" or (attempts[1] == attempts[2] and events[0]["total_tokens"] == 1)
+    assert f"Reported tokens: {1 if failure == 'twice' else 2}" in capsys.readouterr().out
+    if failure == "twice":
+        assert transcript[-1]["type"] == "resume" and not (tmp_path / "work/sections").exists()
+        return
     assert transcript[0]["content"] == "Write the section from the notes in /work/notes/."
     assert notes in transcript[2]["content"] and transcript[-2]["type"] == "tool" and transcript[-2]["status"] == "success" and "3 * previous call" in transcript[-1]["content"]
     assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
@@ -113,8 +133,8 @@ def test_model_from_current_dotenv(tmp_path, monkeypatch, constructed):
     original = models.init_chat_model
     monkeypatch.setattr(models, "init_chat_model", lambda **kwargs: settings.update(kwargs) or (original(**kwargs) if constructed else "model"))
     model = models.make_model()
-    assert all(client.default_headers["Connection"] == "close" and not client._client._transport._pool._http2 for client in (model.root_client, model.root_async_client)) if constructed else model == "model"
-    assert settings == dict(model="env-model", model_provider="openai", base_url="https://llm.example/v1", api_key="offline-key", temperature=0.0, default_headers={"Connection": "close"})
+    assert model.max_retries == model.root_client.max_retries == model.root_async_client.max_retries == 0 and all(client.default_headers["Connection"] == "close" and not client._client._transport._pool._http2 for client in (model.root_client, model.root_async_client)) if constructed else model == "model"
+    assert settings == dict(model="env-model", model_provider="openai", base_url="https://llm.example/v1", api_key="offline-key", temperature=0.0, max_retries=0, default_headers={"Connection": "close"})
     for name in ("MODEL_NAME", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env").write_text("MODEL_NAME=env-model\n")
