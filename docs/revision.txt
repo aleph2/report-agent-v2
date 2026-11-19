@@ -1,0 +1,25 @@
+Revision of one existing section
+
+First refresh its mechanical source-page list (offline):
+  python -m reportagent check CASE --section NAME
+With a separately authorised live-run budget:
+  python -m reportagent revise CASE --section NAME --max-tokens 300000
+NAME is the section file stem, including spaces and Chinese characters if present.
+
+Fresh contexts run in order: verify-sources (80k), review (100k), clarify (40k),
+revise (80k). Each cap is also limited by the remaining CLI budget; unused
+allocation cannot increase another phase's maximum. Usage is counted after
+responses, so a single response can still cross a cap, as in other commands.
+
+verify-sources receives the check file's top source list as its first message,
+then saves work/reviews/NAME-sources.md. review uses that note and saves
+work/reviews/NAME.md. clarify completes work/clarifications/NAME.md, then
+revise edits work/sections/NAME.md. Packaged phase skills are preloaded.
+The final-save notice names write_file or edit_file for the current phase.
+These are phase assignments, not enforced filesystem permissions: the proposed
+path restrictions and edit_file-only enforcement are held for the owner's decision.
+
+Each phase saves its full transcript in work/runs/. Standalone review runs only
+the review phase. plan/run, including --write-only, are for initial drafting;
+use revise for the four-phase revision workflow. No file-content judgement or
+quality gate is added: the agents still decide what evidence and prose mean.

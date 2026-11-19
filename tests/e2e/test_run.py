@@ -19,6 +19,28 @@ from reportagent import cli, models
 from tests.fake_model import ScriptedModel, call
 
 
+@pytest.mark.parametrize("phase,target,tool", [
+    ("verify-sources", "reviews/demo-sources", "write_file"),
+    ("review", "reviews/demo", "write_file"),
+    ("clarify", "clarifications/demo", "write_file"),
+    ("revise", "sections/demo", "edit_file"),
+])
+def test_revision_phase_save_notice(tmp_path, phase, target, tool):
+    from reportagent.budget import TokenCapMiddleware
+    destination = f"/work/{target}.md"
+    file = tmp_path / destination.lstrip("/"); file.parent.mkdir(parents=True, exist_ok=True); file.write_text("Before")
+    allowed = (call(tool, file_path=destination, old_string="Before", new_string="Saved") if tool == "edit_file"
+               else call(tool, file_path=destination, content="Saved"))
+    costs = dict(input_tokens=30, output_tokens=0, total_tokens=30)
+    model = ScriptedModel(responses=[call("read_file", file_path="/index.md").model_copy(update={"usage_metadata": costs}),
+                                    allowed.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)})])
+    result = cli.build_agent(tmp_path, model, phase=phase,
+                             middleware=[TokenCapMiddleware(100, phase=phase)]).invoke({"messages": [("user", "Save.")]})
+    notice = next(m.content for m in result["messages"] if m.type == "human" and "Token budget reached" in m.content)
+    assert phase in notice and tool in notice and "one write" not in notice
+    assert file.read_text() == "Saved" and result["total_tokens"] == 31
+
+
 @pytest.mark.parametrize("cap,gather_costs,written", [(100, [1, 1, 1], 4), (6, [1, 1], 3), (4, [1, 1], 2), (3, [3], 0)])
 def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     (tmp_path / "sources").mkdir()
@@ -79,6 +101,45 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     else:
         assert not draft and "No notes for requested section; writing skipped." in output
         assert not (tmp_path / "work/sections").exists()
+
+
+@pytest.mark.parametrize("budget", [100, 300000, 600000])
+def test_cli_revision(tmp_path, monkeypatch, budget):
+    paths = {"check": "/work/checks/demo.md", "sources": "/work/reviews/demo-sources.md",
+             "review": "/work/reviews/demo.md", "body": "/work/sections/demo.md",
+             "clarify": "/work/clarifications/demo.md", "answers": "/commission/澄清答复.md"}
+    for path in (paths["check"], paths["body"], paths["clarify"], paths["answers"], "/sources/design/page-001.txt", "/sources/design/page-002.txt"):
+        file = tmp_path / path.lstrip("/"); file.parent.mkdir(parents=True, exist_ok=True); file.write_text("Before")
+    top = "# Source pages to review\n- indicator X11 | design.pdf, page 1\n"
+    (tmp_path / paths["check"].lstrip("/")).write_text(top + "\n## Findings\nFinding omitted from the first message.\n")
+    reads = [[paths["check"], "/sources/design/page-001.txt", "/sources/design/page-002.txt"],
+             [paths["sources"], paths["body"]], [paths[k] for k in ("review", "body", "clarify", "answers")],
+             [paths[k] for k in ("clarify", "review", "body")]]
+    saves = [call("write_file", file_path=paths[key], content="Checked") for key in ("sources", "review", "clarify")]
+    saves.append(call("edit_file", file_path=paths["body"], old_string="Before", new_string="Revised"))
+    replies = [reply for pages, save in zip(reads, saves) for reply in
+               [*(call("read_file", file_path=path) for path in pages), save, AIMessage(content="Saved.")]]
+    model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for m in replies])
+    limits, original = [], cli.TokenCapMiddleware
+    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(cli, "TokenCapMiddleware", lambda limit, **kw: limits.append(limit) or original(limit, **kw))
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", str(budget)])
+    cli.main()
+    expected, used = [], 0
+    for maximum, pages in zip((80000, 100000, 40000, 80000), reads):
+        expected.append(min(maximum, budget - used)); used += len(pages) + 2
+    assert limits == expected and sum(limits) <= 300000
+    logs = sorted((tmp_path / "work/runs").glob("*.jsonl"))
+    assert sum(json.loads(line)["type"] == "ai" for log in logs for line in log.read_text().splitlines()) == len(replies)
+    for log, phase, pages in zip(logs, ("verify-sources", "review", "clarify", "revise"), reads):
+        messages = [json.loads(line) for line in log.read_text().splitlines()]
+        assert log.name.endswith(f"-{phase}.jsonl") and phase in messages[int(phase == "verify-sources")]["content"]
+        if phase == "verify-sources": assert messages[0]["content"] == top
+        assert all(m["status"] == "success" for m in messages if m["type"] == "tool")
+        assert next(m for m in messages if m["type"] == "ai")["tool_calls"][0]["args"]["file_path"] == pages[0]
+    assert (tmp_path / paths["body"].lstrip("/")).read_text() == "Revised"
+    assert all((tmp_path / paths[k].lstrip("/")).read_text() == "Checked" for k in ("sources", "review", "clarify"))
+    assert (tmp_path / paths["answers"].lstrip("/")).read_text() == "Before"
 
 
 @pytest.mark.parametrize("failure", ["none", "once", "twice"])
