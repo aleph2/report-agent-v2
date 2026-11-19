@@ -279,3 +279,82 @@ def test_named_run_requires_notes_file(tmp_path, monkeypatch, capsys, matching):
     assert model.i == (2 if matching else 1)
     assert len(list((tmp_path / "work/runs").glob("*.jsonl"))) == (2 if matching else 1)
     assert ("No notes for 02-synthetic; writing skipped." in capsys.readouterr().out) is (not matching)
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_cli_citation_check(tmp_path, monkeypatch, complete):
+    source = tmp_path / "sources"; source.mkdir()
+    for name in ("guide.pdf", "other.pdf"):
+        (source / name).write_bytes(b"Synthetic source.")
+        (source / Path(name).stem).mkdir()
+    texts = {1: "Height 42.6 m length 140 m angle 182°∠50° and 123.\n20~30\n", 2: "88\nsecond line\n", 3: "7\n", 5: "", 6: "Image page\n", 7: "a\nb\n", 18: "20~30", 19: "20~30", 20: "20~30", 95: "20~30", 96: "20~30"}
+    for n, text in texts.items():
+        (source / f"guide/page-{n:03d}.txt").write_text(text)
+    (source / "other/page-001.txt").write_text("88")
+    (source / "other/page-002.txt").write_text("−4.5")
+    reference = tmp_path / "reference"; reference.mkdir()
+    (reference / "outside.pdf").write_text("777")
+    (reference / "outside").mkdir(); (reference / "outside/page-001.txt").write_text("777")
+    sections = tmp_path / "work/sections"; sections.mkdir(parents=True)
+    (sections / "demo.md").write_text("\n".join([
+        "Height４２．６m length１４０m angle１８２°∠５０° [guide.pdf, page 001–003]。",
+        "Number 23 [guide.pdf, page 1]。",
+        "Value 999 [missing.pdf, page 1]。",
+        "Missing text [guide.pdf, page 004]。",
+        "Outside 777 [../reference/outside.pdf, page 1]。",
+        "Alias [同上, page 1]。",
+        "Range 20～30 [guide.pdf, page 018–020, page 95, page 96]。",
+        "Angle 182∠50 and value 88 [guide.pdf, page 1；other.pdf, page 1]。",
+        "Unqualified [page 1]。",
+        "Uncited 999. Height 42.6 [guide.pdf, page 1].",
+        "Reversed [guide.pdf, page 020–018]。",
+        "Huge range [guide.pdf, page 1–999999999]。",
+        "Negative -140 [guide.pdf, page 1]。",
+        "Signed -4.5 [other.pdf, page 2]。",
+    ]))
+    notes = tmp_path / "work/notes"; notes.mkdir()
+    (notes / "demo.md").write_text("\n".join(["MISSING [guide.pdf, page 1]", "Not found [guide.pdf, page 2]", "Absent [guide.pdf, page 3]", "MISSING page 4", "MISSING no page citation", "MISSING [guide.pdf, page 5]", "MISSING [guide.pdf, page 6]", "MISSING [guide.pdf, page 7]", "## Absent [guide.pdf, page 3]"]))
+    calls, results = [], []
+    def read(n, start, end, body):
+        key = f"read-{len(calls)}"
+        calls.append(dict(name="read_file", id=key, args=dict(file_path=f"/sources/guide/page-{n:03d}.txt", offset=start - 1, limit=end - start + 1)))
+        results.append(dict(type="tool", tool_call_id=key, status="success", content=body))
+    read(1, 1, 2, "@@ lines 1-2 of 2 @@\n" + texts[1].rstrip("\n"))
+    read(2, 1, 1, "@@ lines 1-1 of 2 | next offset 1 @@\n88")
+    if complete:
+        read(2, 2, 2, "@@ lines 2-2 of 2 @@\nsecond line")
+    read(3, 1, 1, "@@ lines 1-1 of 1 @@\n7"); results[-1]["status"] = "error"
+    read(5, 1, 1, "System reminder: File exists but has empty contents")
+    read(7, 1, 2, "@@ lines 1-2 of 2 @@\na")
+    image = BytesIO(); Image.new("RGB", (2, 2)).save(image, "PNG")
+    (source / "guide/page-006.png").write_bytes(image.getvalue())
+    calls.append(dict(name="read_file", id="image", args=dict(file_path="/sources/guide/page-006.png")))
+    results.append(dict(type="tool", tool_call_id="image", status="success", content=[dict(type="image_url", image_url=dict(url="data:image/png;base64," + base64.b64encode(image.getvalue()).decode()))]))
+    runs = tmp_path / "work/runs"; runs.mkdir()
+    rows = [dict(type="human", content="Gather evidence for section demo. Save notes to /work/notes/demo.md."), dict(type="ai", tool_calls=calls), dict(type="resume", total_tokens=0), *results]
+    (runs / "1-gather.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
+    (runs / "2-gather.jsonl").write_text("\n".join(json.dumps(row) for row in [dict(type="human", content="Gather evidence for section other. Save notes to /work/notes/other.md."), dict(type="ai", tool_calls=[calls[-4]]), dict(type="tool", tool_call_id=calls[-4]["id"], status="success", content="@@ lines 1-1 of 1 @@\n7")]))
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    monkeypatch.setattr(cli, "make_model", lambda: pytest.fail("check must not construct a model"))
+    monkeypatch.setattr(sys, "argv", ["reportagent", "check", str(tmp_path), "--section", "demo"])
+    cli.main()
+    report = (tmp_path / "work/checks/demo.md").read_text()
+    assert "sections/demo.md:2" in report and "23" in report
+    assert all(f"sections/demo.md:{n}:" in report for n in (3, 4, 5, 6, 9, 11, 12, 13))
+    assert all(f"sections/demo.md:{n}:" not in report for n in (1, 7, 8, 10, 14))
+    assert ("notes/demo.md:2" not in report) is complete
+    assert all(f"notes/demo.md:{n}:" in report for n in (3, 4, 5, 8, 9))
+    assert all(f"notes/demo.md:{n}:" not in report for n in (1, 6, 7))
+    assert all(p.read_bytes() == data for p, data in before.items())
+    assert all(line.strip() and ".md:" in line and " | " in line for line in report.splitlines())
+
+
+def test_verified_citations_produce_empty_check(tmp_path):
+    source = tmp_path / "sources"; source.mkdir()
+    (source / "guide.pdf").touch(); (source / "guide").mkdir()
+    (source / "guide/page-001.txt").write_text("42.6 m")
+    sections = tmp_path / "work/sections"; sections.mkdir(parents=True)
+    (sections / "demo.md").write_text("Height ４２．６ m [guide.pdf, page 1].")
+    notes = tmp_path / "work/notes"; notes.mkdir()
+    (notes / "demo.md").touch()
+    assert cli.check(tmp_path, "demo").read_text() == ""
