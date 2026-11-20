@@ -40,7 +40,9 @@ def test_revision_phase_save_notice(tmp_path, phase, target, tool):
     notice = next(m.content for m in result["messages"] if m.type == "human" and "Token budget reached" in m.content)
     assert phase in notice and tool in notice and "one write" not in notice
     if phase == "revise":
-        assert "single edit_file call" in notice and "remaining changes" in notice
+        assert "separate edit_file calls in this one response" in notice
+    if phase == "clarify":
+        assert "official clarification file" in notice and "separate draft" in notice
     assert file.read_text() == saved and result["total_tokens"] == 31
     assert sum(m.type == "ai" and bool(m.usage_metadata) for m in result["messages"]) == 2
 
@@ -792,6 +794,7 @@ def test_review_phase_model_from_env(tmp_path, monkeypatch, phase, configured, e
     monkeypatch.setattr(models, "init_chat_model", lambda **kwargs: settings.update(kwargs) or "model")
     assert models.make_model(phase) == "model"
     assert settings["model"] == expected
+    assert settings["model_kwargs"]["parallel_tool_calls"] == (phase == "revise")
     assert settings["base_url"] == "https://llm.example/v1" and settings["api_key"] == "offline-key"
 
 
@@ -922,3 +925,94 @@ def test_invalid_revision_phase_options(tmp_path, monkeypatch, options):
     with pytest.raises(SystemExit) as error:
         cli.main()
     assert error.value.code == 2 and not (tmp_path / "work/runs").exists()
+
+
+def test_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
+    paths = {"work/sections/demo.md": "# Section\n\n第1段\n第2段",
+             "work/reviews/demo.md": "Review finding", "work/notes/demo.md": "Working notes",
+             "work/clarifications/demo.md": "number: 94\ncontent: Design question",
+             "work/clarifications/demo.pending.md": "number: 96\ncontent: Proposed question",
+             "work/clarifications/method.md": "number: 2\ncontent: Other\n---\nnumber: 94\ncontent: Scope question\n  continuation\nstatus: Open\n---\nnumber: 3\ncontent: Other",
+             "commission/澄清答复.md": "29: Earlier answer\n94: Owner scope answer"}
+    for rel, text in paths.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    model = ScriptedModel(responses=[AIMessage(content="Done", usage_metadata={
+        "input_tokens": 1, "output_tokens": 0, "total_tokens": 1})])
+    monkeypatch.setattr(cli, "make_model", lambda phase: model)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo",
+                                     "--max-tokens", "100", "--phases", "clarify,revise"])
+    cli.main()
+    clarify, revise = [json.loads(f.read_text().splitlines()[0])["content"]
+                       for f in sorted((tmp_path / "work/runs").glob("*.jsonl"))]
+    for rel in ("work/reviews/demo.md", "work/sections/demo.md", "work/clarifications/demo.md",
+                "work/clarifications/demo.pending.md", "commission/澄清答复.md"):
+        assert rel in clarify and paths[rel] in clarify
+    assert "Next free clarification number: 97" in clarify
+    assert "/work/clarifications/method.md:4" in clarify
+    assert "number: 94\ncontent: Scope question\n  continuation\nstatus: Open" in clarify
+    assert "content: Other" not in clarify and "/commission/澄清答复.md:2" in clarify
+    for rel in ("work/reviews/demo.md", "work/clarifications/demo.md", "work/notes/demo.md"):
+        assert rel in revise and paths[rel] in revise
+    assert "1\t# Section\n2\t\n3\t第1段\n4\t第2段" in revise
+    assert "Proposed question" not in revise
+
+
+@pytest.mark.parametrize("middle,expected", [("B", "Alpha\nBeta\nGamma"), ("absent", "Alpha\nB\nGamma")])
+def test_batched_revision_dispatches_native_edits_in_order(tmp_path, monkeypatch, middle, expected):
+    from deepagents.backends import FilesystemBackend
+    from reportagent.budget import TokenCapMiddleware
+
+    path = tmp_path / "section.md"
+    path.write_text("A\nB\nC")
+    edits = [dict(name="edit_file", id=f"edit-{i}", args=dict(file_path="/section.md", old_string=a, new_string=b))
+             for i, (a, b) in enumerate([("A", "Alpha"), (middle, "Beta"), ("C", "Gamma")])]
+    first = call("ls", path="/").model_copy(update={"usage_metadata": dict(input_tokens=30, output_tokens=0, total_tokens=30)})
+    batch = AIMessage(content="", tool_calls=edits, usage_metadata=dict(input_tokens=6, output_tokens=1, total_tokens=7))
+    order = []
+    original = FilesystemBackend.edit
+    def record(self, file_path, old_string, new_string, replace_all=False):
+        order.append(old_string)
+        return original(self, file_path, old_string, new_string, replace_all)
+    monkeypatch.setattr(FilesystemBackend, "edit", record)
+    model = ScriptedModel(responses=[first, batch])
+    agent = cli.build_agent(tmp_path, model, phase="revise", middleware=[TokenCapMiddleware(100, phase="revise")])
+    state = agent.invoke({"messages": [("user", "Revise the section")]}, config={"max_concurrency": 1})
+    assert order == ["A", middle, "C"] and path.read_text() == expected
+    messages = state["messages"]
+    assert [len(m.tool_calls) for m in messages if m.type == "ai" and m.usage_metadata] == [1, 3]
+    assert state["total_tokens"] == 37
+    results = [m for m in messages if m.type == "tool" and m.name == "edit_file"]
+    assert [m.tool_call_id for m in results] == ["edit-0", "edit-1", "edit-2"]
+    assert "Successfully" in results[0].content and "Successfully" in results[2].content
+    assert ("Successfully" in results[1].content) == (middle == "B")
+
+
+def test_resume_between_revision_edits_preserves_batch(tmp_path, monkeypatch):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from reportagent.budget import TokenCapMiddleware
+
+    target = tmp_path / "section.md"
+    target.write_text("one\ntwo")
+    changes = [dict(name="edit_file", id=old, args=dict(file_path="/section.md", old_string=old, new_string=new))
+               for old, new in (("one", "first"), ("two", "second"))]
+    cost = dict(input_tokens=3, output_tokens=1, total_tokens=4)
+    model = ScriptedModel(responses=[AIMessage(content="", tool_calls=changes, usage_metadata=cost),
+                                     AIMessage(content="Done", usage_metadata=cost)])
+    received = []
+    generate = ScriptedModel._generate
+    def record(self, messages, **kwargs):
+        received.append(messages)
+        return generate(self, messages, **kwargs)
+    monkeypatch.setattr(ScriptedModel, "_generate", record)
+    graph = cli.build_agent(tmp_path, model, phase="revise", checkpointer=InMemorySaver(),
+                            middleware=[TokenCapMiddleware(1000, phase="revise")])
+    config = {"configurable": {"thread_id": "batch"}, "max_concurrency": 1}
+    graph.invoke({"messages": [("user", "Revise")]}, config, interrupt_after=["tools"], durability="sync")
+    assert target.read_text() == "first\ntwo"
+    final = graph.invoke(None, config, durability="sync")
+    assert final["total_tokens"] == 8 and target.read_text() == "first\nsecond"
+    assert len(received) == 2
+    assert [[c["id"] for c in m.tool_calls] for m in received[1] if m.type == "ai"] == [["one", "two"]]
+    assert [m.tool_call_id for m in received[1] if m.type == "tool"] == ["one", "two"]

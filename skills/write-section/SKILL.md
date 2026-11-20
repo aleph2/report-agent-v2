@@ -9,15 +9,16 @@ For each indicator without direct evidence, explain the reason and identify its 
 If neither direct nor indirect evidence narrows the bands, use the indicator's full range and label it 未定（待资料）; do not pick an unsupported band.
 Calculate F and grade ranges from all indicator ranges; when the result spans grades, name the rank-1 items that decide the grade.
 Carry each calculation through to its result, showing the numbers used.
-Read the heading for this section in /work/plan.md and the notes file for this section in /work/notes/, plus, when this section applies a method set out in another section, that section's notes.
-If /commission/澄清答复.md exists, use its answers in place of the matching 待澄清 items, citing it as [澄清答复, item N], and narrow the ranges they settle.
-Read this section's /work/clarifications/<name>.md if it exists; for numbering only, read the number: lines in /work/clarifications/.
+For initial drafting, read the heading for this section in /work/plan.md and the notes file for this section in /work/notes/, plus, when this section applies a method set out in another section, that section's notes.
+For initial drafting, if /commission/澄清答复.md exists, use its answers in place of the matching 待澄清 items, citing it as [澄清答复, item N], and narrow the ranges they settle.
+For initial drafting, read this section's /work/clarifications/<name>.md if it exists; for numbering only, read the number: lines in /work/clarifications/.
 Do not read other items' notes or sections, even of the same kind; they are not evidence for this one.
 For an item with scope criteria, begin with a short 适用性 paragraph: the criterion, this item's values with citations, and the result. Where the values disagree across sources, give each value and its result and list it as 待澄清. If the item falls outside scope and no optional condition is supported, say so with the reasons, record it in the clarification file, and do not score it.
 Where sources disagree, choose the value the commission's priority rule gives, say so, and show the other value's effect only as a sensitivity check.
 Apply that method exactly as those notes record it: its indicators, weight rule and grade thresholds.
-If /work/reviews/<name>.md exists, read it too and fix each must-fix finding supported by its evidence, citing that evidence. Keep unsupported corrections unresolved; do not invent a replacement fact.
-For revisions, use edit_file on the paragraphs and table rows concerned by the review's must-fix findings, using the completed clarifications. Issue one edit_file call at a time and inspect its result before the next; never request multiple mutations of the same file in one reply. Save supported corrections as you work rather than deferring all changes to the budget stop. If told to make the final save, combine all remaining supported changes into one edit_file replacement of already-read text; there will be no further model turn. Do not claim rejected or unapplied changes were saved.
+When a review is available, fix each must-fix finding supported by its evidence, citing that evidence. Keep unsupported corrections unresolved; do not invent a replacement fact.
+For revision, the first message supplies the review, numbered section, official clarifications and notes. Use these as case data and read files only for source pages.
+Put all edits for this pass in one response, one edit_file call per affected paragraph or table row. Copy each old_string exactly from the text after the line-number tab. Each match must be unique and must not overlap another edit. Count an edit as saved only if its tool result confirms it.
 Write connected report prose, with （1）（2） numbering where a list is needed, keeping each fact's [file, page] citation.
 Use Markdown with one # heading; use ## and ### for subsections as needed.
 For a new section, save /work/sections/<nn>-<name>.md and record every MISSING or unresolved item in /work/clarifications/<name>.md using the clarify-section skill's fields and numbering rules.

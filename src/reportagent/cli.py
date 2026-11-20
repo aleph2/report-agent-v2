@@ -132,6 +132,61 @@ def _verification_input(case, name, top):
     return HumanMessage(content=blocks if len(blocks) > 1 else top)
 
 
+def _revision_input(case, name, phase, prompt):
+    root = case.resolve()
+    review = f"work/reviews/{name}.md"
+    section = f"work/sections/{name}.md"
+    official = f"work/clarifications/{name}.md"
+    paths = [review, section, official]
+    blocks = [prompt]
+    contents = {}
+
+    def read(relative):
+        if relative not in contents:
+            path = (root / relative).resolve()
+            text = None
+            if path.is_relative_to(root) and path.is_file():
+                text = path.read_text(encoding="utf-8-sig", errors="replace")
+            contents[relative] = text
+        return contents[relative]
+
+    conflicts = {}
+    if phase == "clarify":
+        next_number, conflicts = clarification_numbers(case)
+        blocks.append(f"Next free clarification number: {next_number}.")
+        folder = root / "work/clarifications"
+        paths.extend(path.relative_to(root).as_posix() for path in sorted(folder.glob("*.md"))
+                     if path.name.startswith(f"{name}.pending."))
+        paths.append("commission/澄清答复.md")
+    else:
+        paths.append(f"work/notes/{name}.md")
+
+    for relative in paths:
+        text = read(relative)
+        if text is not None and phase == "revise" and relative == section:
+            text = "\n".join(f"{line_no}\t{line}" for line_no, line in enumerate(text.splitlines(), 1))
+        blocks.append(f"Case file: /{relative}\n" + (text if text is not None else "(unavailable)"))
+
+    for number, locations in conflicts.items():
+        for location in locations:
+            label, _, line_no = location.rpartition(":")
+            relative = label.lstrip("/")
+            text = read(relative)
+            excerpt = "(unavailable)"
+            if text is not None:
+                lines = text.splitlines()
+                start = int(line_no) - 1
+                end = start + 1
+                if relative.startswith("work/clarifications/"):
+                    while start > 0 and lines[start - 1].strip() != "---":
+                        start -= 1
+                    while end < len(lines) and lines[end].strip() != "---":
+                        end += 1
+                excerpt = "\n".join(lines[start:end])
+            blocks.append(f"Duplicate clarification {number}: {location}\n{excerpt}")
+    return "\n\n".join(blocks)
+
+
 def _numbers(text):
     text = unicodedata.normalize("NFKC", text).replace("∠", "<").replace("−", "-")
     text = re.sub(r"(?<=\d)\s+(?=\.)|(?<=\.)\s+(?=\d)", "", text)
@@ -433,11 +488,8 @@ def main():
         cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
                                  phase=phase if phase in REVISION_CAPS else None)
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
-        if phase == "clarify":
-            next_number, conflicts = clarification_numbers(args.case)
-            prompt += f"\nNext free clarification number: {next_number}."
-            for number, locations in conflicts.items():
-                prompt += f"\nDuplicate clarification {number}: " + "; ".join(locations)
+        if phase in ("clarify", "revise"):
+            prompt = _revision_input(args.case, args.section, phase, prompt)
         state = {"messages": [HumanMessage(content=prompt)]}
         if phase == "verify-sources":
             top = (args.case / f"work/checks/{args.section}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]

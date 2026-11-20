@@ -11,7 +11,7 @@ To reuse the existing verification and review, select the remaining phases and t
 --phases selects a comma-separated subset in workflow order. Repeat --phase-cap NAME=N
 for distinct selected phases. Each effective cap is limited by the remaining total.
 Clarify receives the next free clarification number (highest recorded plus one, or 1
-in an empty case) and the file and line of each conflicting claim on a number.
+in an empty case) and each conflicting record with its file and line.
 
 Default phases and caps: verify-sources (80k), review (100k), clarify (40k),
 revise (80k). Each cap is also limited by the remaining CLI budget; unused
@@ -22,7 +22,16 @@ verify-sources receives the check file's top source list as its first message,
 then saves work/reviews/NAME-sources.md. review uses that note and saves
 work/reviews/NAME.md. clarify completes work/clarifications/NAME.md, then
 revise edits work/sections/NAME.md. Packaged phase skills are preloaded.
-The final-save notice names write_file or edit_file for the current phase.
+Clarify starts with the review, section, official clarification file, pending drafts
+for this section (NAME.pending.md and NAME.pending.*.md), owner answers,
+and full records for duplicate numbers. Its final save targets the official file.
+Revise starts with the review, numbered section, official clarifications and notes.
+Line numbers followed by a tab are display prefixes and are excluded from edits.
+Only revise enables the model to return several tool calls in one response.
+A response consisting of multiple edit_file calls is dispatched one native edit
+at a time in order. Each result is retained, including a failed match. After
+the batch, the original response and its tool results form the next model input
+and the saved transcript. Model usage is counted once per provider response.
 These are phase assignments, not enforced filesystem permissions: the proposed
 path restrictions and edit_file-only enforcement are held for the owner's decision.
 
