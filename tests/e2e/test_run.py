@@ -28,9 +28,10 @@ from tests.fake_model import ScriptedModel, call
 def test_revision_phase_save_notice(tmp_path, phase, target, tool):
     from reportagent.budget import TokenCapMiddleware
     destination = f"/work/{target}.md"
-    file = tmp_path / destination.lstrip("/"); file.parent.mkdir(parents=True, exist_ok=True); file.write_text("Before")
-    allowed = (call(tool, file_path=destination, old_string="Before", new_string="Saved") if tool == "edit_file"
-               else call(tool, file_path=destination, content="Saved"))
+    before, saved = ("Before first\nBefore second", "Saved first\nSaved second") if phase == "revise" else ("Before", "Saved")
+    file = tmp_path / destination.lstrip("/"); file.parent.mkdir(parents=True, exist_ok=True); file.write_text(before)
+    allowed = (call(tool, file_path=destination, old_string=before, new_string=saved) if tool == "edit_file"
+               else call(tool, file_path=destination, content=saved))
     costs = dict(input_tokens=30, output_tokens=0, total_tokens=30)
     model = ScriptedModel(responses=[call("read_file", file_path="/index.md").model_copy(update={"usage_metadata": costs}),
                                     allowed.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)})])
@@ -38,7 +39,10 @@ def test_revision_phase_save_notice(tmp_path, phase, target, tool):
                              middleware=[TokenCapMiddleware(100, phase=phase)]).invoke({"messages": [("user", "Save.")]})
     notice = next(m.content for m in result["messages"] if m.type == "human" and "Token budget reached" in m.content)
     assert phase in notice and tool in notice and "one write" not in notice
-    assert file.read_text() == "Saved" and result["total_tokens"] == 31
+    if phase == "revise":
+        assert "single edit_file call" in notice and "remaining changes" in notice
+    assert file.read_text() == saved and result["total_tokens"] == 31
+    assert sum(m.type == "ai" and bool(m.usage_metadata) for m in result["messages"]) == 2
 
 
 @pytest.mark.parametrize("cap,gather_costs,written", [(100, [1, 1, 1], 4), (6, [1, 1], 3), (4, [1, 1], 2), (3, [3], 0)])
@@ -195,7 +199,7 @@ def test_model_from_current_dotenv(tmp_path, monkeypatch, constructed):
     monkeypatch.setattr(models, "init_chat_model", lambda **kwargs: settings.update(kwargs) or (original(**kwargs) if constructed else "model"))
     model = models.make_model()
     assert model.max_retries == model.root_client.max_retries == model.root_async_client.max_retries == 0 and all(client.default_headers["Connection"] == "close" and not client._client._transport._pool._http2 for client in (model.root_client, model.root_async_client)) if constructed else model == "model"
-    assert settings == dict(model="env-model", model_provider="openai", base_url="https://llm.example/v1", api_key="offline-key", temperature=0.0, max_retries=0, default_headers={"Connection": "close"})
+    assert settings == dict(model="env-model", model_provider="openai", base_url="https://llm.example/v1", api_key="offline-key", temperature=0.0, max_retries=0, model_kwargs={"parallel_tool_calls": False}, default_headers={"Connection": "close"})
     for name in ("MODEL_NAME", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env").write_text("MODEL_NAME=env-model\n")
@@ -699,9 +703,20 @@ def test_cli_revision_uses_review_model_except_for_clarify(tmp_path, monkeypatch
         selected.append(kwargs["model"])
         return {"audit-model": audit, "default-model": default}[kwargs["model"]]
     monkeypatch.setattr(models, "init_chat_model", init_model)
+    configs = []
+    original_build = cli.build_agent
+    def build(*args, **kwargs):
+        agent = original_build(*args, **kwargs)
+        def stream(state, **kwargs):
+            configs.append(kwargs["config"])
+            assert kwargs["config"]["max_concurrency"] == 1
+            return agent.stream(state, **kwargs)
+        return SimpleNamespace(stream=stream, get_state=agent.get_state)
+    monkeypatch.setattr(cli, "build_agent", build)
     monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", "300000"])
     cli.main()
     assert selected == ["audit-model", "audit-model", "default-model", "audit-model"]
+    assert len(configs) == 4
     assert (tmp_path / "work/sections/demo.md").read_text() == "Revised by audit model"
     assert (tmp_path / "work/clarifications/demo.md").read_text() == "Clarified by default model"
     assert (tmp_path / "work/reviews/demo-sources.md").read_text() == "Verified by audit model"

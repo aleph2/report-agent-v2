@@ -260,7 +260,7 @@ def main():
             top = (args.case / f"work/checks/{args.section}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]
             state["messages"].insert(0, HumanMessage(content=top))
         log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
-        config = {"configurable": {"thread_id": log.stem}}
+        config = {"configurable": {"thread_id": log.stem}, "max_concurrency": 1}
         resume = None
         try:
             model = make_model(phase)
