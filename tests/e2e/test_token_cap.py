@@ -1,3 +1,5 @@
+import json
+
 from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
@@ -75,3 +77,100 @@ def test_final_save_turn(tmp_path, costs, limit, calls, used, saved, writing):
         assert "3 * previous call" in result["messages"][-1].text
     else:
         assert "reported total >= cap" in result["messages"][-1].text
+
+
+@pytest.mark.parametrize("info,guard", [(True, False), (False, True), (True, True)])
+def test_preflight_budget_at_provider_boundary(tmp_path, info, guard):
+    import httpx
+    from langchain_openai import ChatOpenAI
+    from deepagents import register_harness_profile
+    from reportagent.models import RUN_PROFILE
+    register_harness_profile("openai:offline", RUN_PROFILE)
+
+    log = tmp_path / "requests.jsonl"
+    cap = TokenCapMiddleware(60_000, phase="revise", info=info, guard=guard, request_log=log)
+    payloads = []
+
+    def reply(request):
+        body = json.loads(request.content)
+        entry = json.loads(log.read_text().splitlines()[-1])
+        remaining = 1_000 if payloads else 60_000
+        assert entry["decision"] == "send" and entry["remaining_tokens"] == remaining
+        assert entry["estimated_input_tokens"] > 100  # tools and system prompt dwarf the user text
+        limit = body.get("max_completion_tokens", body.get("max_tokens"))
+        assert limit == entry["max_output_tokens"]
+        if guard:
+            assert 0 < limit <= remaining - entry["estimated_input_tokens"]
+        else:
+            assert limit == remaining
+        payloads.append(body)
+        if len(payloads) == 1:
+            message = {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "list", "type": "function", "function": {"name": "ls", "arguments": '{"path":"/"}'}}
+            ]}
+            tokens = 59_000
+        else:
+            message = {"role": "assistant", "content": "Done."}
+            tokens = 10
+        return httpx.Response(200, json={
+            "id": "offline", "object": "chat.completion", "created": 1, "model": "offline",
+            "choices": [{"index": 0, "finish_reason": "tool_calls" if "tool_calls" in message else "stop", "message": message}],
+            "usage": {"prompt_tokens": tokens - 1, "completion_tokens": 1, "total_tokens": tokens},
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(reply)) as client:
+        model = ChatOpenAI(model="offline", api_key="offline", base_url="https://offline.invalid/v1",
+                           http_client=client, max_retries=0)
+        result = build_agent(tmp_path, model, phase="revise", middleware=[cap]).invoke(
+            {"messages": [("user", "Revise.")]}
+        )
+    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [entry["remaining_tokens"] for entry in entries] == [60_000, 1_000]
+    if guard:
+        assert len(payloads) == 1 and result["total_tokens"] == 59_000
+        assert entries[-1]["decision"] == "stop" and "cap" in result["messages"][-1].text.lower()
+    else:
+        assert len(payloads) == 2 and result["total_tokens"] == 59_010
+        assert "1000" in payloads[-1]["messages"][-1]["content"].replace(",", "")
+
+
+def test_cli_guard_stops_oversized_first_input(tmp_path, monkeypatch, capsys):
+    import sys
+    from reportagent import cli
+
+    section = tmp_path / "work/sections/left.md"
+    section.parent.mkdir(parents=True)
+    section.write_text("stratum " * 3_000)
+    model = ScriptedModel(responses=[AIMessage(content="Unused.")])
+    monkeypatch.setattr(cli, "make_model", lambda phase: model)
+    monkeypatch.setattr(ScriptedModel, "_generate", lambda *args, **kwargs: pytest.fail("Guard sent oversized input"))
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "left",
+                                     "--phases", "revise", "--phase-cap", "revise=40000",
+                                     "--max-tokens", "20000", "--budget-guard"])
+    cli.main()
+    sidecar, = (tmp_path / "work/runs").glob("*-revise.requests.jsonl")
+    entry = json.loads(sidecar.read_text())
+    assert entry["decision"] == "stop" and entry["remaining_tokens"] == 20_000
+    assert entry["estimated_input_tokens"] > 20_000
+    assert "Reported tokens: 0" in capsys.readouterr().out
+
+
+def test_estimate_includes_system_tools_and_image(tmp_path):
+    from langchain.agents import create_agent
+    from langchain_core.tools import StructuredTool
+
+    def estimate(system, description, blocks):
+        tool = StructuredTool.from_function(lambda: "ok", name="example", description=description)
+        log = tmp_path / "estimate.jsonl"
+        cap = TokenCapMiddleware(60_000, info=True, request_log=log)
+        agent = create_agent(ScriptedModel(responses=[AIMessage(content="Done.")]), tools=[tool],
+                             system_prompt=system, middleware=[cap])
+        agent.invoke({"messages": [HumanMessage(content=blocks)]})
+        return json.loads(log.read_text().splitlines()[-1])["estimated_input_tokens"]
+
+    text = [{"type": "text", "text": "One claim."}]
+    base = estimate("Review.", "Read.", text)
+    assert estimate("Review. " * 500, "Read.", text) > base + 100
+    assert estimate("Review.", "Read. " * 500, text) > base + 100
+    image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nm1cAAAAASUVORK5CYII="
+    assert estimate("Review.", "Read.", [*text, {"type": "image_url", "image_url": {"url": image_url}}]) > base

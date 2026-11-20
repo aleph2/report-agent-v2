@@ -406,6 +406,8 @@ def main():
         command.add_argument("case", type=Path)
         if name in ("plan", "run", "review", "revise"):
             command.add_argument("--max-tokens", type=int, required=True)
+            command.add_argument("--budget-info", action="store_true", help="Log input estimates and limit response tokens")
+            command.add_argument("--budget-guard", action="store_true", help="Stop before a request with insufficient estimated room")
         if name in ("review", "revise", "check"):
             command.add_argument("--section", required=True)
         if name == "revise":
@@ -485,8 +487,6 @@ def main():
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
         if phase in REVISION_CAPS:
             limit = min(limit, phase_caps[phase])
-        cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
-                                 phase=phase if phase in REVISION_CAPS else None)
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
         if phase in ("clarify", "revise"):
             prompt = _revision_input(args.case, args.section, phase, prompt)
@@ -495,6 +495,9 @@ def main():
             top = (args.case / f"work/checks/{args.section}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]
             state["messages"].insert(0, _verification_input(args.case, args.section, top))
         log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
+        cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
+                                 phase=phase if phase in REVISION_CAPS else None, info=args.budget_info, guard=args.budget_guard,
+                                 request_log=log.with_suffix(".requests.jsonl"))
         config = {"configurable": {"thread_id": log.stem}, "max_concurrency": 1}
         resume = None
         try:

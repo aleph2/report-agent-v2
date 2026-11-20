@@ -1,7 +1,12 @@
+import json
 from typing import NotRequired
 
 from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages.utils import count_tokens_approximately
+
+
+OUTPUT_RESERVE = 8000
 
 
 class TokenCapState(AgentState):
@@ -14,10 +19,41 @@ class TokenCapState(AgentState):
 class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
     state_schema = TokenCapState
 
-    def __init__(self, max_tokens, *, remind=True, phase=None):
+    def __init__(self, max_tokens, *, remind=True, phase=None, info=False, guard=False, request_log=None):
         self.max_tokens = max_tokens
         self.remind = remind
         self.phase = phase
+        self.info = info
+        self.guard = guard
+        self.request_log = request_log
+
+    def _prepare(self, request):
+        if not (self.info or self.guard):
+            return request
+        messages = ([request.system_message] if request.system_message else []) + request.messages
+        # Chinese engineering text is denser than the default English estimate.
+        estimate = count_tokens_approximately(messages, tools=request.tools, chars_per_token=1.5, tokens_per_image=16384)
+        remaining = self.max_tokens - request.state.get("total_tokens", 0)
+        available = remaining - estimate
+        stop = self.guard and available < OUTPUT_RESERVE
+        output = None if stop else (available if self.guard else remaining)
+        if self.request_log is not None:
+            with self.request_log.open("a", encoding="utf-8") as log:
+                log.write(json.dumps(dict(estimated_input_tokens=estimate, remaining_tokens=remaining,
+                                          max_output_tokens=output, decision="stop" if stop else "send")) + "\n")
+        if stop:
+            return AIMessage(content=f"Token cap reached before send: estimated input {estimate} + {OUTPUT_RESERVE} output "
+                                     f"reserve exceeds {remaining} remaining tokens.",
+                             response_metadata={"budget_stop": True})
+        return request.override(model_settings={**request.model_settings, "max_completion_tokens": output})
+
+    def wrap_model_call(self, request, handler):
+        prepared = self._prepare(request)
+        return prepared if isinstance(prepared, AIMessage) else handler(prepared)
+
+    async def awrap_model_call(self, request, handler):
+        prepared = self._prepare(request)
+        return prepared if isinstance(prepared, AIMessage) else await handler(prepared)
 
     def _end(self, total, rule="reported total >= cap"):
         return {"total_tokens": total, "jump_to": "end", "messages": [
@@ -45,6 +81,8 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
                 save = f"In the {self.phase} phase, save your work now with write_file; do not read anything more."
             else:
                 save = "Save your work now in one write; do not read anything more."
+            if self.info:
+                save += f" Remaining allowance: {self.max_tokens - total} tokens."
             return {"final_save_rule": "reported total + 3 * previous call > cap", "messages": [HumanMessage(
                 content="Token budget reached. " + save
             )]}
@@ -57,14 +95,18 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
 
     def after_model(self, state, runtime):
         reply = state["messages"][-1]
+        if reply.response_metadata.get("budget_stop"):
+            return {"total_tokens": state.get("total_tokens", 0)}
         reported = (reply.usage_metadata or {}).get("total_tokens")
         total = state.get("total_tokens", 0) + (reported or 0)
         update = {"total_tokens": total, "usage_missing": state.get("usage_missing", False) or reported is None}
         return update
 
     def after_agent(self, state, runtime):
-        rule = state.get("final_save_rule")
-        reply = self._end(state.get("total_tokens", 0), rule)["messages"][0] if rule else state["messages"][-1]
+        reply = state["messages"][-1]
+        rule = state.get("final_save_rule") and not reply.response_metadata.get("budget_stop")
+        if rule:
+            reply = self._end(state.get("total_tokens", 0), state["final_save_rule"])["messages"][0]
         if state.get("usage_missing"):
             text = reply.text + "\nUsage metadata was missing for some model calls; those calls counted as 0."
             reply = reply.model_copy(update={"content": text})
