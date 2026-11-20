@@ -190,16 +190,55 @@ def test_verification_attaches_only_available_explicit_pages(tmp_path):
     secret.write_text("outside case sources")
     (sources / "a/page-002.txt").write_text("first page in range")
     (sources / "a/page-003.txt").write_text("later page")
-    (sources / "a/page-018.txt").write_text("ambiguous page")
+    (sources / "a/page-9002.txt").write_text("outside range")
     (sources / "a/page-002.png").symlink_to(secret)
     (sources / "b/page-004.txt").write_bytes(bytes([255]))
     top = "- absence Missing | /work/notes/demo.md:1:1 | citations"
     blocks = cli._verification_input(tmp_path, "demo", top).content_blocks
     texts = [b["text"] for b in blocks]
+    assert any("later page" in t for t in texts)
     assert sum("first page in range" in t for t in texts) == 1
-    assert not any(s in t for t in texts for s in ("outside case sources", "later page", "ambiguous page"))
+    assert not any(s in t for t in texts for s in ("outside case sources", "outside range"))
     assert any("page-004.txt" in t and "unavailable" in t.lower() for t in texts)
     assert cli._verification_input(tmp_path, "demo", top.replace(":1:1", ":15:1")).content == top.replace(":1:1", ":15:1")
+
+
+
+def test_absence_attaches_continuation_and_images_only_for_short_text(tmp_path):
+    pages = tmp_path / "sources/design"
+    pages.mkdir(parents=True)
+    pages.with_suffix(".pdf").touch()
+    body = tmp_path / "work/sections/demo.md"
+    body.parent.mkdir(parents=True)
+    body.write_text("Missing slope [design.pdf, page 22].\nRange [design.pdf, pages 25–27].")
+    for n in (22, 23, 25, 26, 27, 28):
+        (pages / f"page-{n:03d}.txt").write_text("图" * 300 if n == 22 else f"row {n}")
+        (pages / f"page-{n:03d}.png").write_bytes(str(n).encode())
+    top = "\n".join(["- indicator X11 | /work/sections/demo.md:1:1 | citation",
+                     "- absence Missing | /work/sections/demo.md:1:1 | citation",
+                     "- indicator X12 | /work/sections/demo.md:2:1 | citation"])
+    blocks = cli._verification_input(tmp_path, "demo", top).content_blocks
+    assert [base64.b64decode(b["base64"]) for b in blocks if b["type"] == "image"] == [b"23", b"25", b"26", b"27"]
+    assert any(b.get("text", "").endswith("row 23") for b in blocks)
+    assert sum(b.get("text", "").startswith("Claim to check") for b in blocks) == 2
+
+
+def test_check_compares_stated_risk_and_counts_source_items(tmp_path):
+    for key in ("sections", "notes", "reviews", "clarifications"):
+        (tmp_path / "work" / key).mkdir(parents=True)
+    (tmp_path / "work/sections/demo.md").write_text("算术基准值 F＝64.59，对应Ⅳ级。未见。未列。")
+    (tmp_path / "work/notes/demo.md").touch()
+    (tmp_path / "work/reviews/demo-sources.md").write_text("|1 (claim)|x|\n|1|another clause|\n")
+    (tmp_path / "work/clarifications/demo.md").write_text(
+        "number: 77\neffect: 现基准 64.59，Ⅲ级\nnumber: 78\neffect: F=61.25，对应Ⅳ级\n"
+        "number: 79\neffect: 现基准 64.590，Ⅳ级\nnumber: 80\neffect: 当前风险等级为Ⅱ级\n")
+    result = cli.check(tmp_path, "demo").read_text()
+    assert "checklist entries=2; distinct source-check IDs=1; missing IDs=2" in result
+    assert all(f"clarification {n} " in result for n in (77, 78, 80))
+    assert "clarification 79 " not in result and "64.59" in result and "IV" in result
+    (tmp_path / "work/sections/demo.md").write_text("F=64.59。")
+    result = cli.check(tmp_path, "demo").read_text()
+    assert "clarification 78 " in result and "clarification 77 " not in result
 
 
 def test_verification_deduplicates_and_bounds_initial_pages(tmp_path):
@@ -733,7 +772,7 @@ def test_export_client_fields_and_agent_order(tmp_path):
     ("verify-sources", "audit-model", "audit-model"),
     ("review", "audit-model", "audit-model"),
     ("revise", "audit-model", "audit-model"),
-    ("clarify", "audit-model", "default-model"),
+    ("clarify", "audit-model", "audit-model"),
     ("write", "audit-model", "default-model"),
     ("gather", "audit-model", "default-model"),
     ("plan", "audit-model", "default-model"),
@@ -756,7 +795,7 @@ def test_review_phase_model_from_env(tmp_path, monkeypatch, phase, configured, e
     assert settings["base_url"] == "https://llm.example/v1" and settings["api_key"] == "offline-key"
 
 
-def test_cli_revision_uses_review_model_except_for_clarify(tmp_path, monkeypatch):
+def test_cli_revision_uses_review_model_for_all_four_phases(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     for key, value in {"MODEL_NAME": "default-model", "REVIEW_MODEL_NAME": "audit-model",
                        "OPENAI_BASE_URL": "https://llm.example/v1", "OPENAI_API_KEY": "offline-key"}.items():
@@ -768,17 +807,14 @@ def test_cli_revision_uses_review_model_except_for_clarify(tmp_path, monkeypatch
     audit = ScriptedModel(responses=[
         call("write_file", file_path="/work/reviews/demo-sources.md", content="Verified by audit model"), AIMessage(content="Saved"),
         call("write_file", file_path="/work/reviews/demo.md", content="Reviewed by audit model"), AIMessage(content="Saved"),
+        call("write_file", file_path="/work/clarifications/demo.md", content="Clarified by audit model"), AIMessage(content="Saved"),
         call("edit_file", file_path="/work/sections/demo.md", old_string="Before", new_string="Revised by audit model"), AIMessage(content="Saved"),
     ])
-    default = ScriptedModel(responses=[
-        call("write_file", file_path="/work/clarifications/demo.md", content="Clarified by default model"), AIMessage(content="Saved"),
-    ])
-    for model in (audit, default):
-        model.responses = [reply.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for reply in model.responses]
+    audit.responses = [reply.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for reply in audit.responses]
     selected = []
     def init_model(**kwargs):
         selected.append(kwargs["model"])
-        return {"audit-model": audit, "default-model": default}[kwargs["model"]]
+        return audit
     monkeypatch.setattr(models, "init_chat_model", init_model)
     configs = []
     original_build = cli.build_agent
@@ -792,9 +828,11 @@ def test_cli_revision_uses_review_model_except_for_clarify(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "build_agent", build)
     monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", "300000"])
     cli.main()
-    assert selected == ["audit-model", "audit-model", "default-model", "audit-model"]
+    assert selected == ["audit-model"] * 4
+    log = next((tmp_path / "work/runs").glob("*-verify-sources.jsonl"))
+    assert [r["initial_request_input_tokens"] for r in map(json.loads, log.read_text().splitlines()) if "initial_request_input_tokens" in r] == [1]
     assert len(configs) == 4
     assert (tmp_path / "work/sections/demo.md").read_text() == "Revised by audit model"
-    assert (tmp_path / "work/clarifications/demo.md").read_text() == "Clarified by default model"
+    assert (tmp_path / "work/clarifications/demo.md").read_text() == "Clarified by audit model"
     assert (tmp_path / "work/reviews/demo-sources.md").read_text() == "Verified by audit model"
     assert (tmp_path / "work/reviews/demo.md").read_text() == "Reviewed by audit model"

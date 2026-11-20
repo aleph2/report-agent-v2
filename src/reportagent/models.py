@@ -14,7 +14,7 @@ RUN_PROFILE = HarnessProfile(
 
 def make_model(phase=None):
     load_dotenv(Path.cwd() / ".env")
-    name = os.environ.get("REVIEW_MODEL_NAME") if phase in ("verify-sources", "review", "revise") else None
+    name = os.environ.get("REVIEW_MODEL_NAME") if phase in ("verify-sources", "review", "clarify", "revise") else None
     name = name or os.environ["MODEL_NAME"]
     # Helpers and automatic summaries would bypass the main token counter.
     register_harness_profile(f"openai:{name}", RUN_PROFILE)

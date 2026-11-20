@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 import sys
 
@@ -59,39 +60,52 @@ def _verification_input(case, name, top):
     blocks = [{"type": "text", "text": top}]
     documents, claims, pages = {}, set(), {}
     pattern = r"(?: \| |; )(/work/(?:sections|notes)/" + re.escape(name) + r"\.md):(\d+):\d+ \| "
-    for location in re.finditer(pattern, top):
-        path, number = location[1], int(location[2])
-        if (path, number) in claims:
-            continue
-        if path not in documents:
-            file = (root / path.lstrip("/")).resolve()
-            if not file.is_relative_to(root / "work") or not file.is_file():
+    # A location may appear first as an indicator, then as an absence entry needing its continuation.
+    available = {}
+    for entry in top.splitlines():
+        for location in re.finditer(pattern, entry):
+            path, number = location[1], int(location[2])
+            if path not in documents:
+                file = (root / path.lstrip("/")).resolve()
+                if not file.is_relative_to(root / "work") or not file.is_file():
+                    continue
+                try:
+                    documents[path] = file.read_text(encoding="utf-8").splitlines()
+                except (OSError, UnicodeError):
+                    continue
+            if not 1 <= number <= len(documents[path]):
                 continue
-            try:
-                documents[path] = file.read_text(encoding="utf-8").splitlines()
-            except (OSError, UnicodeError):
-                continue
-        if not 1 <= number <= len(documents[path]):
-            continue
-        claim = documents[path][number - 1]
-        claims.add((path, number))
-        blocks.append({"type": "text", "text": f"Claim to check ({path}:{number}):\n{claim}"})
-        for _, filename, ranges, _ in _citations(claim):
-            if filename.lower().endswith(".pdf"):
+            claim = documents[path][number - 1]
+            if (path, number) not in claims:
+                claims.add((path, number))
+                blocks.append({"type": "text", "text": f"Claim to check ({path}:{number}):\n{claim}"})
+            for _, filename, ranges, _ in _citations(claim):
+                if not filename.lower().endswith(".pdf"):
+                    continue
                 pdf = _source_document(sources, filename)
-                if pdf:
-                    for start, end in ranges:
-                        if 1 <= start <= end:
-                            pages.setdefault((pdf, start), filename)
+                if not pdf or not pdf.with_suffix("").resolve().is_relative_to(sources):
+                    continue
+                if pdf not in available:
+                    available[pdf] = sorted({int(p.stem[5:]) for p in pdf.with_suffix("").glob("page-*")
+                                             if re.fullmatch(r"page-\d+\.(?:txt|png)", p.name)})
+                for start, end in ranges:
+                    if 1 <= start <= end:
+                        last = end + int(entry.startswith("- absence "))
+                        for page_number in available[pdf]:
+                            if start <= page_number <= last:
+                                pages.setdefault((pdf, page_number), filename)
 
-    # Bound initial request size; remaining citations and range continuations are available to read_file.
+    # Bound initial request size; remaining pages are available to read_file.
     available_bytes = 8 * 1024 * 1024
     attached = 0
     for (pdf, start), filename in pages.items():
         if attached == 10:
             break
         before = len(blocks)
+        needs_image = True
         for ext in ("txt", "png"):
+            if ext == "png" and not needs_image:
+                continue
             page = pdf.with_suffix("") / f"page-{start:03d}.{ext}"
             if not page.resolve().is_relative_to(sources) or not page.is_file():
                 continue
@@ -99,9 +113,13 @@ def _verification_input(case, name, top):
             try:
                 size = page.stat().st_size
                 if size > available_bytes:
+                    if ext == "txt":
+                        needs_image = False
                     continue
                 if ext == "txt":
-                    blocks.append({"type": "text", "text": label + "\n" + page.read_text(encoding="utf-8")})
+                    page_text = page.read_text(encoding="utf-8")
+                    needs_image = len(page_text.strip()) < 300
+                    blocks.append({"type": "text", "text": label + "\n" + page_text})
                 else:
                     image = base64.b64encode(page.read_bytes()).decode("ascii")
                     blocks.extend([{"type": "text", "text": label},
@@ -155,6 +173,74 @@ def _full_source_reads(case, name):
     return opened
 
 
+
+# Compare written statements only. Never derive a risk grade or evaluate a scoring formula.
+_SCORE = re.compile(
+    r"(?P<baseline>(?:算术|现|当前)?基准值|(?:算术|现|当前)基准|baseline(?: score)?)\s*[:=为]?\s*(?:F\s*[:=为]\s*)?"
+    r"|(?<![A-Za-z0-9])F\s*(?:值\s*)?(?:[:=为]|is\b)\s*", re.I)
+_VALUE = re.compile(r"-?\d+(?:\.\d+)?(?![\d.]|\s*[+*/×÷~～−-])")
+_GRADE = r"(?P<grade>IV|III|II|I|[1-4])(?:\s*级|\b)"
+_GRADE_AFTER = re.compile(r"\s*(?:[>,≥≤<]\s*\d+(?:\.\d+)?)?[\s,，、:(]*(?:对应|为|属(?:于)?|grade\s*)?\s*" + _GRADE, re.I)
+_GRADE_ONLY = re.compile(r"(?:风险等级|基准等级|risk grade|grade)\s*[:=为]?\s*" + _GRADE, re.I)
+
+
+def _written_grade(match):
+    grade = match["grade"].upper()
+    return {"1": "I", "2": "II", "3": "III", "4": "IV"}.get(grade, grade)
+
+
+def _risk_statements(line):
+    line = unicodedata.normalize("NFKC", line)
+    covered = set()
+    for label in _SCORE.finditer(line):
+        value = _VALUE.match(line, label.end())
+        if not value:
+            continue
+        grade = _GRADE_AFTER.match(line, value.end())
+        if grade:
+            covered.add(grade.start("grade"))
+        yield bool(label["baseline"]), Decimal(value[0]), _written_grade(grade) if grade else None
+    for grade in _GRADE_ONLY.finditer(line):
+        if grade.start("grade") not in covered:
+            yield "基准" in grade[0], None, _written_grade(grade)
+
+
+def _verification_comparison(case, name, section, count):
+    output = []
+    note = case / f"work/reviews/{name}-sources.md"
+    if note.is_file():
+        rows = re.findall(r"^\s*\|\s*(\d+)(?=\s|\||[.、(（])", note.read_text(encoding="utf-8"), re.M)
+        ids = set(map(int, rows))
+        expected = set(range(1, count + 1))
+        output.append(f"checklist entries={count}; distinct source-check IDs={len(ids)}; "
+                      f"missing IDs={','.join(map(str, sorted(expected - ids))) or 'none'}; "
+                      f"extra IDs={','.join(map(str, sorted(ids - expected))) or 'none'}; numbered rows={len(rows)}")
+    clarifications = case / f"work/clarifications/{name}.md"
+    if clarifications.is_file():
+        section_values = list(dict.fromkeys(item for line in section for item in _risk_statements(line)))
+        baseline = [item for item in section_values if item[0]]
+        number = "?"
+        for line_no, line in enumerate(clarifications.read_text(encoding="utf-8").splitlines(), 1):
+            if line.startswith("number:"):
+                number = line.partition(":")[2].strip()
+            for is_baseline, score, grade in _risk_statements(line):
+                reference = baseline if is_baseline and baseline else section_values
+                pairs = [(s, g) for _, s, g in reference]
+                comparable = [(s, g) for s, g in pairs if (score is None or s is not None)
+                              and (grade is None or g is not None)]
+                if comparable:
+                    differs = not any((score is None or score == s) and (grade is None or grade == g) for s, g in comparable)
+                else:
+                    scores = {s for s, _ in pairs if s is not None}
+                    grades = {g for _, g in pairs if g is not None}
+                    differs = (score is not None and scores and score not in scores) or (grade and grades and grade not in grades)
+                if differs:
+                    stated = ", ".join(dict.fromkeys(f"{s if s is not None else '—'}/{g or '—'}" for s, g in pairs))
+                    output.append(f"clarification {number} line {line_no}: F/grade {score if score is not None else '—'}/{grade or '—'}; "
+                                  f"section states {stated}")
+    return output
+
+
 def check(case, name):
     case, findings = Path(case), []
     sources = (case / "sources").resolve()
@@ -198,7 +284,8 @@ def check(case, name):
 
     section_path = f"/work/sections/{name}.md"
     previous = {}
-    for line_number, line in enumerate((case / section_path.lstrip("/")).read_text(encoding="utf-8").splitlines(), 1):
+    section = (case / section_path.lstrip("/")).read_text(encoding="utf-8").splitlines()
+    for line_number, line in enumerate(section, 1):
         listed_pages(line, list(_citations(line, previous.copy())), f"{section_path}:{line_number}:1")
         for sentence in re.finditer(r".+?(?:[。！？!?]|\.(?=\s|$)|$)", line):
             refs = list(_citations(sentence[0], previous))
@@ -241,10 +328,12 @@ def check(case, name):
     output = case / f"work/checks/{name}.md"
     output.parent.mkdir(parents=True, exist_ok=True)
     inventory = [f"- indicator {label} | " + ("; ".join(entries) or "(no file/page citation)") for label, entries in indicators.items()] + inventory
+    comparison = _verification_comparison(case, name, section, len(inventory))
     output.write_text(
         "# Source pages to review\n" + "\n".join(inventory) + "\n\n## Findings\n"
         + "".join(line + "\n" for line in findings[:40])
-        + f"\nFindings: total={len(findings)}; shown={min(40, len(findings))}; omitted={max(0, len(findings) - 40)}\n",
+        + f"\nFindings: total={len(findings)}; shown={min(40, len(findings))}; omitted={max(0, len(findings) - 40)}\n"
+        + ("\n## Verification comparison\n" + "\n".join(comparison) + "\n" if comparison else ""),
         encoding="utf-8",
     )
     return output
@@ -349,6 +438,13 @@ def main():
                     pass
         finally:
             lines = [message.model_dump_json() + "\n" for message in state["messages"]]
+            if phase == "verify-sources":
+                for i, message in enumerate(state["messages"]):
+                    if message.type == "ai":
+                        record = json.loads(lines[i])
+                        record["initial_request_input_tokens"] = (message.usage_metadata or {}).get("input_tokens")
+                        lines[i] = json.dumps(record, ensure_ascii=False) + "\n"
+                        break
             if resume:
                 lines.insert(resume[0], resume[1] + "\n")
             log.write_text("".join(lines), encoding="utf-8")
