@@ -172,7 +172,8 @@ def test_verification_opens_with_cited_page(tmp_path, monkeypatch):
     texts = [b["text"] for b in blocks if b["type"] == "text"]
     assert top in texts and any(claim in t for t in texts)
     assert any("/sources/design/page-001.txt" in t and page.read_text() in t for t in texts)
-    assert not any("ANOTHER PAGE" in t for t in texts)
+    assert sum("ANOTHER PAGE" in t for t in texts) == 1
+    assert any("different claim" in t for t in texts)
     images = [b for b in blocks if b["type"] == "image"]
     assert len(images) == 1 and base64.b64decode(images[0]["base64"]) == page.with_suffix(".png").read_bytes()
 
@@ -199,6 +200,27 @@ def test_verification_attaches_only_available_explicit_pages(tmp_path):
     assert not any(s in t for t in texts for s in ("outside case sources", "later page", "ambiguous page"))
     assert any("page-004.txt" in t and "unavailable" in t.lower() for t in texts)
     assert cli._verification_input(tmp_path, "demo", top.replace(":1:1", ":15:1")).content == top.replace(":1:1", ":15:1")
+
+
+def test_verification_deduplicates_and_bounds_initial_pages(tmp_path):
+    doc = tmp_path / "sources/a"
+    doc.mkdir(parents=True)
+    doc.with_suffix(".pdf").touch()
+    (doc / "page-001.png").write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+    notes = tmp_path / "work/notes/demo.md"
+    notes.parent.mkdir(parents=True)
+    for number in range(1, 12):
+        (doc / f"page-{number:03d}.txt").write_text(f"source {number}")
+    notes.write_text("\n".join(f"Claim {n} [a.pdf, page {n}]" for n in range(1, 12)))
+    locations = [f"/work/notes/demo.md:{n}:1 | [a.pdf, page {n}]" for n in range(1, 12)]
+    top = "- indicator X11 | " + "; ".join(locations) + "\n- absence missing | " + locations[0]
+    blocks = cli._verification_input(tmp_path, "demo", top).content_blocks
+    texts = [b["text"] for b in blocks]
+    assert not any(b["type"] == "image" for b in blocks)
+    assert sum(t.startswith("Claim to check") for t in texts) == 11
+    assert sum(t.startswith("Source:") for t in texts) == 10
+    assert any(t.endswith("source 10") for t in texts)
+    assert not any(t.endswith("source 11") for t in texts)
 
 
 @pytest.mark.parametrize("failure", ["none", "once", "twice"])

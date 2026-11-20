@@ -54,52 +54,64 @@ def _source_document(sources, filename):
 
 
 def _verification_input(case, name, top):
-    first = next((line for line in top.splitlines() if line.startswith("- ")), "")
-    location = re.search(r" \| (/work/(?:sections|notes)/" + re.escape(name) + r"\.md):(\d+):\d+ \| ", first)
-    if not location:
-        return HumanMessage(content=top)
     root = case.resolve()
-    claim_path = (root / location[1].lstrip("/")).resolve()
-    if not claim_path.is_relative_to(root / "work") or not claim_path.is_file():
-        return HumanMessage(content=top)
-    try:
-        lines = claim_path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        return HumanMessage(content=top)
-    number = int(location[2])
-    if not 1 <= number <= len(lines):
-        return HumanMessage(content=top)
-    claim = lines[number - 1]
-    blocks = [{"type": "text", "text": top},
-              {"type": "text", "text": f"Claim to check ({location[1]}:{number}):\n{claim}"}]
     sources = root / "sources"
-    seen = set()
-    for _, filename, ranges, _ in _citations(claim):
-        if not filename.lower().endswith(".pdf"):
+    blocks = [{"type": "text", "text": top}]
+    documents, claims, pages = {}, set(), {}
+    pattern = r"(?: \| |; )(/work/(?:sections|notes)/" + re.escape(name) + r"\.md):(\d+):\d+ \| "
+    for location in re.finditer(pattern, top):
+        path, number = location[1], int(location[2])
+        if (path, number) in claims:
             continue
-        pdf = _source_document(sources, filename)
-        if pdf is None:
-            continue
-        # Start a cited range at its first page; the agent can request the remaining pages.
-        for start, end in ranges:
-            if start < 1 or end < start or (pdf, start) in seen:
+        if path not in documents:
+            file = (root / path.lstrip("/")).resolve()
+            if not file.is_relative_to(root / "work") or not file.is_file():
                 continue
-            seen.add((pdf, start))
-            for ext in ("txt", "png"):
-                page = pdf.with_suffix("") / f"page-{start:03d}.{ext}"
-                if not page.resolve().is_relative_to(sources) or not page.is_file():
+            try:
+                documents[path] = file.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError):
+                continue
+        if not 1 <= number <= len(documents[path]):
+            continue
+        claim = documents[path][number - 1]
+        claims.add((path, number))
+        blocks.append({"type": "text", "text": f"Claim to check ({path}:{number}):\n{claim}"})
+        for _, filename, ranges, _ in _citations(claim):
+            if filename.lower().endswith(".pdf"):
+                pdf = _source_document(sources, filename)
+                if pdf:
+                    for start, end in ranges:
+                        if 1 <= start <= end:
+                            pages.setdefault((pdf, start), filename)
+
+    # Bound initial request size; remaining citations and range continuations are available to read_file.
+    available_bytes = 8 * 1024 * 1024
+    attached = 0
+    for (pdf, start), filename in pages.items():
+        if attached == 10:
+            break
+        before = len(blocks)
+        for ext in ("txt", "png"):
+            page = pdf.with_suffix("") / f"page-{start:03d}.{ext}"
+            if not page.resolve().is_relative_to(sources) or not page.is_file():
+                continue
+            label = f"Source: {filename}, PDF page {start} (/{page.relative_to(root).as_posix()})"
+            try:
+                size = page.stat().st_size
+                if size > available_bytes:
                     continue
-                label = f"Source: {filename}, PDF page {start} (/{page.relative_to(root).as_posix()})"
-                try:
-                    if ext == "txt":
-                        blocks.append({"type": "text", "text": label + "\n" + page.read_text(encoding="utf-8")})
-                    else:
-                        image = base64.b64encode(page.read_bytes()).decode("ascii")
-                        blocks.extend([{"type": "text", "text": label},
-                                       {"type": "image", "mime_type": "image/png", "base64": image}])
-                except (OSError, UnicodeError) as error:
-                    blocks.append({"type": "text", "text": f"{label} unavailable ({type(error).__name__})"})
-    return HumanMessage(content=blocks)
+                if ext == "txt":
+                    blocks.append({"type": "text", "text": label + "\n" + page.read_text(encoding="utf-8")})
+                else:
+                    image = base64.b64encode(page.read_bytes()).decode("ascii")
+                    blocks.extend([{"type": "text", "text": label},
+                                   {"type": "image", "mime_type": "image/png", "base64": image}])
+                available_bytes -= size
+            except (OSError, UnicodeError) as error:
+                blocks.append({"type": "text", "text": f"{label} unavailable ({type(error).__name__})"})
+        attached += len(blocks) > before
+
+    return HumanMessage(content=blocks if len(blocks) > 1 else top)
 
 
 def _numbers(text):
