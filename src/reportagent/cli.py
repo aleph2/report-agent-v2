@@ -1,4 +1,5 @@
 import argparse
+import base64
 import json
 import re
 import unicodedata
@@ -44,6 +45,61 @@ def _citations(text, previous=None):
                 previous.update(filename=filename, ranges=ranges)
                 yield offset, filename, ranges, {offset + m.start() for m in matches}
             offset += len(part) + 1
+
+
+def _source_document(sources, filename):
+    path = (sources / filename.removeprefix("/sources/").removeprefix("sources/")).resolve()
+    if path.is_relative_to(sources) and path.is_file():
+        return path
+
+
+def _verification_input(case, name, top):
+    first = next((line for line in top.splitlines() if line.startswith("- ")), "")
+    location = re.search(r" \| (/work/(?:sections|notes)/" + re.escape(name) + r"\.md):(\d+):\d+ \| ", first)
+    if not location:
+        return HumanMessage(content=top)
+    root = case.resolve()
+    claim_path = (root / location[1].lstrip("/")).resolve()
+    if not claim_path.is_relative_to(root / "work") or not claim_path.is_file():
+        return HumanMessage(content=top)
+    try:
+        lines = claim_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return HumanMessage(content=top)
+    number = int(location[2])
+    if not 1 <= number <= len(lines):
+        return HumanMessage(content=top)
+    claim = lines[number - 1]
+    blocks = [{"type": "text", "text": top},
+              {"type": "text", "text": f"Claim to check ({location[1]}:{number}):\n{claim}"}]
+    sources = root / "sources"
+    seen = set()
+    for _, filename, ranges, _ in _citations(claim):
+        if not filename.lower().endswith(".pdf"):
+            continue
+        pdf = _source_document(sources, filename)
+        if pdf is None:
+            continue
+        # Start a cited range at its first page; the agent can request the remaining pages.
+        for start, end in ranges:
+            if start < 1 or end < start or (pdf, start) in seen:
+                continue
+            seen.add((pdf, start))
+            for ext in ("txt", "png"):
+                page = pdf.with_suffix("") / f"page-{start:03d}.{ext}"
+                if not page.resolve().is_relative_to(sources) or not page.is_file():
+                    continue
+                label = f"Source: {filename}, PDF page {start} (/{page.relative_to(root).as_posix()})"
+                try:
+                    if ext == "txt":
+                        blocks.append({"type": "text", "text": label + "\n" + page.read_text(encoding="utf-8")})
+                    else:
+                        image = base64.b64encode(page.read_bytes()).decode("ascii")
+                        blocks.extend([{"type": "text", "text": label},
+                                       {"type": "image", "mime_type": "image/png", "base64": image}])
+                except (OSError, UnicodeError) as error:
+                    blocks.append({"type": "text", "text": f"{label} unavailable ({type(error).__name__})"})
+    return HumanMessage(content=blocks)
 
 
 def _numbers(text):
@@ -109,9 +165,9 @@ def check(case, name):
 
     def pages(filename, ranges, location):
         if filename not in page_files:
-            source = (sources / filename.removeprefix("/sources/").removeprefix("sources/")).resolve()
+            source = _source_document(sources, filename)
             page_files[filename] = None
-            if source.is_relative_to(sources) and source.is_file():
+            if source is not None:
                 page_files[filename] = {
                     int(p.stem[5:]): p.resolve() for p in source.with_suffix("").glob("page-*.txt")
                     if re.fullmatch(r"page-\d+", p.stem) and p.resolve().is_relative_to(sources)
@@ -211,7 +267,7 @@ def main():
     elif args.command == "revise":
         name = args.section
         phases = (
-            ("verify-sources", f"verify-sources for section {name}: read /work/checks/{name}.md. "
+            ("verify-sources", f"verify-sources for section {name} using the supplied list from /work/checks/{name}.md. "
              f"Save the source checks to /work/reviews/{name}-sources.md."),
             ("review", f"review section {name}: read /work/reviews/{name}-sources.md first. "
              f"Save the review to /work/reviews/{name}.md."),
@@ -258,7 +314,7 @@ def main():
         state = {"messages": [HumanMessage(content=prompt)]}
         if phase == "verify-sources":
             top = (args.case / f"work/checks/{args.section}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]
-            state["messages"].insert(0, HumanMessage(content=top))
+            state["messages"].insert(0, _verification_input(args.case, args.section, top))
         log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
         config = {"configurable": {"thread_id": log.stem}, "max_concurrency": 1}
         resume = None

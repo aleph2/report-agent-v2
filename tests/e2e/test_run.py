@@ -146,6 +146,61 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
     assert (tmp_path / paths["answers"].lstrip("/")).read_text() == "Before"
 
 
+def test_verification_opens_with_cited_page(tmp_path, monkeypatch):
+    source = tmp_path / "sources"
+    source.mkdir()
+    copyfile(Path(__file__).parents[1] / "fixtures/one-page.pdf", source / "design.pdf")
+    cli.ingest(tmp_path)
+    page = source / "design/page-001.txt"
+    page.write_text("Table 4: design height 42 m.")
+    (source / "design/page-002.txt").write_text("ANOTHER PAGE")
+    body = tmp_path / "work/sections/demo.md"
+    body.parent.mkdir(parents=True)
+    claim = "| X11 | design height 42 m [page 018；design.pdf, page 001] |"
+    body.write_text(claim + "\n| X12 | different claim [design.pdf, page 002] |")
+    notes = tmp_path / "work/notes/demo.md"
+    notes.parent.mkdir()
+    notes.touch()
+    top = cli.check(tmp_path, "demo").read_text().partition("\n## Findings")[0]
+    model = ScriptedModel(responses=[AIMessage(content="Done.")])
+    monkeypatch.setattr(cli, "make_model", lambda phase: model)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", "100"])
+    with patch.object(ScriptedModel, "_generate", autospec=True, side_effect=ScriptedModel._generate) as generated:
+        cli.main()
+    first = generated.call_args_list[0].args[1]
+    blocks = [b for m in first if m.type == "human" for b in m.content_blocks]
+    texts = [b["text"] for b in blocks if b["type"] == "text"]
+    assert top in texts and any(claim in t for t in texts)
+    assert any("/sources/design/page-001.txt" in t and page.read_text() in t for t in texts)
+    assert not any("ANOTHER PAGE" in t for t in texts)
+    images = [b for b in blocks if b["type"] == "image"]
+    assert len(images) == 1 and base64.b64decode(images[0]["base64"]) == page.with_suffix(".png").read_bytes()
+
+
+def test_verification_attaches_only_available_explicit_pages(tmp_path):
+    notes = tmp_path / "work/notes/demo.md"
+    notes.parent.mkdir(parents=True)
+    notes.write_text("Missing [page 18; ../private.pdf, page 1; a.pdf, page 2–9000, page 2; b.pdf, page 4].")
+    sources = tmp_path / "sources"
+    for filename in ("a", "b"):
+        (sources / filename).mkdir(parents=True)
+        (sources / (filename + ".pdf")).touch()
+    secret = tmp_path / "private.pdf"
+    secret.write_text("outside case sources")
+    (sources / "a/page-002.txt").write_text("first page in range")
+    (sources / "a/page-003.txt").write_text("later page")
+    (sources / "a/page-018.txt").write_text("ambiguous page")
+    (sources / "a/page-002.png").symlink_to(secret)
+    (sources / "b/page-004.txt").write_bytes(bytes([255]))
+    top = "- absence Missing | /work/notes/demo.md:1:1 | citations"
+    blocks = cli._verification_input(tmp_path, "demo", top).content_blocks
+    texts = [b["text"] for b in blocks]
+    assert sum("first page in range" in t for t in texts) == 1
+    assert not any(s in t for t in texts for s in ("outside case sources", "later page", "ambiguous page"))
+    assert any("page-004.txt" in t and "unavailable" in t.lower() for t in texts)
+    assert cli._verification_input(tmp_path, "demo", top.replace(":1:1", ":15:1")).content == top.replace(":1:1", ":15:1")
+
+
 @pytest.mark.parametrize("failure", ["none", "once", "twice"])
 def test_cli_write_only(tmp_path, monkeypatch, capsys, failure):
     from httpx import RemoteProtocolError
