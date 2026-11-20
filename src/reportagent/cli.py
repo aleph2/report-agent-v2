@@ -202,7 +202,6 @@ def main():
     if args.command == "check":
         print(check(args.case, args.section))
         return
-    model = make_model()
     remaining = args.max_tokens
     total = 0
     folder = args.case / "work/runs"
@@ -264,6 +263,7 @@ def main():
         config = {"configurable": {"thread_id": log.stem}}
         resume = None
         try:
+            model = make_model(phase)
             agent = build_agent(args.case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
                                 phase=phase if phase in REVISION_CAPS else None)
             # Flush each checkpoint before advancing; avoids queued background writes.

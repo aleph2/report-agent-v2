@@ -60,7 +60,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     costs = [*gather_costs, 1, 1, 1, 1]
     model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=cost, output_tokens=0, total_tokens=cost)}) for reply, cost in zip(replies, costs)])
     made, limits = [], []
-    monkeypatch.setattr(cli, "make_model", lambda: made.append(True) or model)
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: made.append(True) or model)
     middleware = cli.TokenCapMiddleware
     monkeypatch.setattr(cli, "TokenCapMiddleware", lambda limit, **kw: limits.append(limit) or middleware(limit, **kw))
     for required in (["run"], ["review"], ["review", "--section", "01-hydrology"], ["review", "--max-tokens", "100"]):
@@ -74,7 +74,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     assert (tmp_path / "index.md").read_text() == "# Case files\n\n## commission/brief.md\n\nText: commission/brief.md.files/text.md\n\n## sources/one-page.pdf\n\nPages: 1\n\nPage paths: sources/one-page/page-001.txt ... page-001.txt\nPage images: sources/one-page/page-001.png ... page-001.png\n\n"
     with Image.open(tmp_path / "sources/one-page/page-001.png") as image:
         assert image.format == "PNG" and max(image.size) == 1600
-    assert len(made) == 1 and limits == [int(cap * 0.6)] + ([max(0, cap - gathered)] if written else [])
+    assert len(made) == (2 if written else 1) and limits == [int(cap * 0.6)] + ([max(0, cap - gathered)] if written else [])
     if len(gather_costs) > 1:
         assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
     logs = sorted((tmp_path / "work/runs").glob("*.jsonl"))
@@ -121,7 +121,7 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
                [*(call("read_file", file_path=path) for path in pages), save, AIMessage(content="Saved.")]]
     model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for m in replies])
     limits, original = [], cli.TokenCapMiddleware
-    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     monkeypatch.setattr(cli, "TokenCapMiddleware", lambda limit, **kw: limits.append(limit) or original(limit, **kw))
     monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", str(budget)])
     cli.main()
@@ -161,7 +161,7 @@ def test_cli_write_only(tmp_path, monkeypatch, capsys, failure):
             raise RemoteProtocolError("No response.")
         return original(self, messages, **kwargs)
     monkeypatch.setattr(ScriptedModel, "_generate", generate)
-    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "3", "--write-only"])
     if failure == "twice":
         with pytest.raises(RemoteProtocolError):
@@ -207,7 +207,7 @@ def test_failed_run_keeps_conversation(tmp_path, monkeypatch):
     def interrupted(state, **kwargs):
         yield {"messages": [*state["messages"], AIMessage(content="Before failure.")]}
         (tmp_path / "missing").read_text()
-    monkeypatch.setattr(cli, "make_model", lambda: ScriptedModel(responses=[AIMessage(content="unused")]))
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: ScriptedModel(responses=[AIMessage(content="unused")]))
     monkeypatch.setattr(cli, "build_agent", lambda *args, **kwargs: SimpleNamespace(stream=interrupted))
     monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "100"])
     with pytest.raises(FileNotFoundError):
@@ -220,7 +220,7 @@ def test_cli_call_limit_and_missing_usage(tmp_path, monkeypatch):
     (tmp_path / "commission").mkdir(exist_ok=True)
     (tmp_path / "commission/brief.md").write_text("Read the commission.")
     model = ScriptedModel(responses=[call("read_file", file_path="/commission/brief.md") for _ in range(401)])
-    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "100000"])
     cli.main()
     logs = list((tmp_path / "work/runs").glob("*.jsonl"))
@@ -251,7 +251,7 @@ def test_plan_then_named_section(tmp_path, monkeypatch):
     outputs = {"/work/plan.md": f"## {section}\nDrainage. [guide.pdf, page 1]\n", f"/work/notes/{section}.md": "Evidence.",
                f"/work/sections/{section}.md": "# Hydrology", f"/work/reviews/{section}.md": "method | Hydrology | Missing band. [guide.pdf, page 1] | must-fix"}
     model = ScriptedModel(responses=[reply for path, text in outputs.items() for reply in (call("write_file", file_path=path, content=text), AIMessage(content="Saved."))])
-    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     for command in ("plan", "run", "review"):
         section_args = ["--section", section] if command != "plan" else []
         monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "10", *section_args])
@@ -319,7 +319,7 @@ def test_plan_and_review_receive_half_budget_note(tmp_path, monkeypatch, command
     target = "/work/plan.md" if command == "plan" else "/work/reviews/01-synthetic.md"
     replies = [call("read_file", file_path="/commission/brief.md"), call("read_file", file_path="/commission/brief.md"), call("write_file", file_path=target, content=plan), AIMessage(content="Saved.")]
     model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n)}) for reply, n in zip(replies, [2, 2, 1, 1])])
-    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     section_args = ["--section", "01-synthetic"] if command == "review" else []
     monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "10", *section_args])
     cli.main()
@@ -334,7 +334,7 @@ def test_named_run_requires_notes_file(tmp_path, monkeypatch, capsys, matching):
     notes = tmp_path / "work/notes"; notes.mkdir(parents=True)
     (notes / ("02-synthetic.md" if matching else "01-other.md")).touch()
     model = ScriptedModel(responses=[AIMessage(content="Done.") for _ in range(3)])
-    monkeypatch.setattr(cli, "make_model", lambda: model)
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--section", "02-synthetic", "--max-tokens", "100"])
     cli.main()
     assert model.i == (2 if matching else 1)
@@ -396,7 +396,7 @@ def test_cli_citation_check(tmp_path, monkeypatch, complete):
     (runs / "1-gather.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
     (runs / "2-gather.jsonl").write_text("\n".join(json.dumps(row) for row in [dict(type="human", content="Gather evidence for section other. Save notes to /work/notes/other.md."), dict(type="ai", tool_calls=[calls[-4]]), dict(type="tool", tool_call_id=calls[-4]["id"], status="success", content="@@ lines 1-1 of 1 @@\n7")]))
     before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-    monkeypatch.setattr(cli, "make_model", lambda: pytest.fail("check must not construct a model"))
+    monkeypatch.setattr(cli, "make_model", lambda phase=None: pytest.fail("check must not construct a model"))
     monkeypatch.setattr(sys, "argv", ["reportagent", "check", str(tmp_path), "--section", "demo"])
     cli.main()
     report = (tmp_path / "work/checks/demo.md").read_text().split("## Findings\n", 1)[1].split("\nFindings:", 1)[0].strip()
@@ -646,3 +646,63 @@ def test_export_client_fields_and_agent_order(tmp_path):
     assert "Internal process" not in str(rows)
     assert len(word.comments) == len(rows) - 1 == 4
     assert all("Internal process detail" in c.text for c in word.comments)
+
+
+@pytest.mark.parametrize("phase,configured,expected", [
+    ("verify-sources", "audit-model", "audit-model"),
+    ("review", "audit-model", "audit-model"),
+    ("revise", "audit-model", "audit-model"),
+    ("clarify", "audit-model", "default-model"),
+    ("write", "audit-model", "default-model"),
+    ("gather", "audit-model", "default-model"),
+    ("plan", "audit-model", "default-model"),
+    ("review", "", "default-model"),
+    ("review", None, "default-model"),
+])
+def test_review_phase_model_from_env(tmp_path, monkeypatch, phase, configured, expected):
+    monkeypatch.chdir(tmp_path)
+    for key, value in {"MODEL_NAME": "default-model", "OPENAI_BASE_URL": "https://llm.example/v1",
+                       "OPENAI_API_KEY": "offline-key"}.items():
+        monkeypatch.setenv(key, value)
+    if configured is None:
+        monkeypatch.delenv("REVIEW_MODEL_NAME", raising=False)
+    else:
+        monkeypatch.setenv("REVIEW_MODEL_NAME", configured)
+    settings = {}
+    monkeypatch.setattr(models, "init_chat_model", lambda **kwargs: settings.update(kwargs) or "model")
+    assert models.make_model(phase) == "model"
+    assert settings["model"] == expected
+    assert settings["base_url"] == "https://llm.example/v1" and settings["api_key"] == "offline-key"
+
+
+def test_cli_revision_uses_review_model_except_for_clarify(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for key, value in {"MODEL_NAME": "default-model", "REVIEW_MODEL_NAME": "audit-model",
+                       "OPENAI_BASE_URL": "https://llm.example/v1", "OPENAI_API_KEY": "offline-key"}.items():
+        monkeypatch.setenv(key, value)
+    (tmp_path / "work/sections").mkdir(parents=True)
+    (tmp_path / "work/sections/demo.md").write_text("Before")
+    (tmp_path / "work/checks").mkdir()
+    (tmp_path / "work/checks/demo.md").write_text("# Source pages to review\n\n## Findings\n")
+    audit = ScriptedModel(responses=[
+        call("write_file", file_path="/work/reviews/demo-sources.md", content="Verified by audit model"), AIMessage(content="Saved"),
+        call("write_file", file_path="/work/reviews/demo.md", content="Reviewed by audit model"), AIMessage(content="Saved"),
+        call("edit_file", file_path="/work/sections/demo.md", old_string="Before", new_string="Revised by audit model"), AIMessage(content="Saved"),
+    ])
+    default = ScriptedModel(responses=[
+        call("write_file", file_path="/work/clarifications/demo.md", content="Clarified by default model"), AIMessage(content="Saved"),
+    ])
+    for model in (audit, default):
+        model.responses = [reply.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for reply in model.responses]
+    selected = []
+    def init_model(**kwargs):
+        selected.append(kwargs["model"])
+        return {"audit-model": audit, "default-model": default}[kwargs["model"]]
+    monkeypatch.setattr(models, "init_chat_model", init_model)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", "300000"])
+    cli.main()
+    assert selected == ["audit-model", "audit-model", "default-model", "audit-model"]
+    assert (tmp_path / "work/sections/demo.md").read_text() == "Revised by audit model"
+    assert (tmp_path / "work/clarifications/demo.md").read_text() == "Clarified by default model"
+    assert (tmp_path / "work/reviews/demo-sources.md").read_text() == "Verified by audit model"
+    assert (tmp_path / "work/reviews/demo.md").read_text() == "Reviewed by audit model"
