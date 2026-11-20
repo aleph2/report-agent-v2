@@ -1,3 +1,4 @@
+from collections import Counter, defaultdict
 from copy import deepcopy
 from importlib.resources import files
 from io import BytesIO
@@ -275,7 +276,11 @@ def _old_answers(target, cfg):
             rows.append(values)
     labels = dict(zip(cfg["sheet_fields"].split("|"), cfg["sheet_columns"].split("|")))
     columns = {field: next((col for col, label in rows[0].items() if label == labels.get(field)), None) for field in ("number", "status", "answer", "responder")}
-    return {int(row[columns["number"]]): [row.get(columns[field], "") for field in ("status", "answer", "responder")] for row in rows[1:] if row.get(columns["number"])}
+    numbered = [(int(row[columns["number"]]), row) for row in rows[1:] if row.get(columns["number"])]
+    counts = Counter(number for number, _ in numbered)
+    return {number: [row.get(columns[field], "") for field in ("status", "answer", "responder")]
+            for number, row in numbered if counts[number] == 1
+            and row.get(columns["status"]) != cfg["item_conflict_status"]}
 
 
 def _xlsx(target, headers, rows, cfg):
@@ -340,14 +345,49 @@ def _xlsx(target, headers, rows, cfg):
     temporary.replace(target)
 
 
+def _settings(case):
+    cfg = dict(_fields(files("reportagent.export").joinpath("settings.txt").read_text(encoding="utf-8")))
+    settings = case / "commission/template/settings.txt"
+    if settings.exists():
+        cfg.update(_fields(settings.read_text(encoding="utf-8-sig")))
+    return cfg
+
+
+def clarification_numbers(case, cfg=None):
+    """A question and its answer share a number; repetition within either role conflicts."""
+    if cfg is None:
+        cfg = _settings(case)
+    case = case.resolve()
+    definitions = sorted((case / "work/clarifications").rglob("*"))
+    answer_files = {case / "commission/澄清答复.md"}
+    if cfg["answers_file"]:
+        answer_files.add((case / cfg["answers_file"]).resolve())
+    locations = defaultdict(list)
+    conflicts = set()
+    for paths, pattern in ((definitions, r"^number:[ \t]*(\d+)[ \t]*$"),
+                           (sorted(answer_files), r"^(\d+):")):
+        seen = set()
+        for path in paths:
+            if not path.is_file():
+                continue
+            label = "/" + path.relative_to(case).as_posix() if path.is_relative_to(case) else str(path)
+            for line_no, line in enumerate(path.read_text(encoding="utf-8-sig", errors="replace").splitlines(), 1):
+                match = re.match(pattern, line)
+                if match:
+                    number = int(match[1])
+                    locations[number].append(f"{label}:{line_no}")
+                    if number in seen:
+                        conflicts.add(number)
+                    seen.add(number)
+    return max(locations, default=0) + 1, {n: locations[n] for n in sorted(conflicts)}
+
+
 def export_docx(case_dir):
     case = Path(case_dir)
     template = case / "commission/template"
     package = files("reportagent.export")
-    cfg = dict(_fields(package.joinpath("settings.txt").read_text(encoding="utf-8")))
-    settings = template / "settings.txt"
-    if settings.exists():
-        cfg.update(_fields(settings.read_text(encoding="utf-8-sig")))
+    cfg = _settings(case)
+    _, conflicts = clarification_numbers(case, cfg)
     reference = template / "reference.docx"
     data = reference.read_bytes() if reference.exists() else package.joinpath("reference.docx").read_bytes()
     document = Document(BytesIO(data))
@@ -400,6 +440,8 @@ def export_docx(case_dir):
             document.add_comment(anchor, text, author=cfg["comment_author"])
             status, answer, responder = answers.get(number, [cfg["item_status"], "", ""])
             status = item.get("status", status)
+            if number in conflicts:
+                status, answer, responder = cfg["item_conflict_status"], "", ""
             records.append(dict(item, number=number, section=heading.text, position=position, status=status, answer=answer, responder=responder))
     output.mkdir(parents=True, exist_ok=True)
     target = output / cfg["docx_file"]

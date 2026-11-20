@@ -3,7 +3,8 @@ name: clarify-section
 description: Complete a section's client clarification rows from its review, body and recorded answers.
 ---
 Read the review, section, current clarification file and /commission/澄清答复.md if present.
-Use matching answers in place of pending items; keep every existing number, including retired numbers. For new items use unused numbers.
+Use a recorded answer only for the question it answers. Preserve existing unique numbers, including retired numbers. Start new items at the supplied next free number.
+For a reported collision, inspect the listed locations. If they establish which question owns the number, keep its number and give the unrelated question a fresh one. Leave an ambiguous match unresolved.
 Fill every client field from the review and section; if a fact remains unknown, say so rather than inventing it.
 Write one block per item separated by ---: number:, anchor: 「exact body sentence」, content:, sources:.
 Write each source as its full filename and page (or item for an unpaged answer file); never use 同上 or same as above, because client rows stand alone.

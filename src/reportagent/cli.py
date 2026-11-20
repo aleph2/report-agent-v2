@@ -17,7 +17,7 @@ from langchain_core.messages import HumanMessage
 
 from .agent import build_agent
 from .budget import TokenCapMiddleware
-from .export.docx import export_docx
+from .export.docx import clarification_numbers, export_docx
 from .ingest import ingest
 from .models import make_model
 
@@ -329,11 +329,15 @@ def check(case, name):
     output.parent.mkdir(parents=True, exist_ok=True)
     inventory = [f"- indicator {label} | " + ("; ".join(entries) or "(no file/page citation)") for label, entries in indicators.items()] + inventory
     comparison = _verification_comparison(case, name, section, len(inventory))
+    _, conflicts = clarification_numbers(case)
+    duplicates = [f"duplicate clarification {number}: " + "; ".join(locations)
+                  for number, locations in conflicts.items()]
     output.write_text(
         "# Source pages to review\n" + "\n".join(inventory) + "\n\n## Findings\n"
         + "".join(line + "\n" for line in findings[:40])
         + f"\nFindings: total={len(findings)}; shown={min(40, len(findings))}; omitted={max(0, len(findings) - 40)}\n"
-        + ("\n## Verification comparison\n" + "\n".join(comparison) + "\n" if comparison else ""),
+        + ("\n## Verification comparison\n" + "\n".join(comparison) + "\n" if comparison else "")
+        + ("\n## Duplicate clarification numbers\n" + "\n".join(duplicates) + "\n" if duplicates else ""),
         encoding="utf-8",
     )
     return output
@@ -349,6 +353,10 @@ def main():
             command.add_argument("--max-tokens", type=int, required=True)
         if name in ("review", "revise", "check"):
             command.add_argument("--section", required=True)
+        if name == "revise":
+            command.add_argument("--phases", metavar="LIST", help="Comma-separated phases in the revision workflow")
+            command.add_argument("--phase-cap", action="append", default=[], metavar="NAME=N",
+                                 help="Override one selected phase's token cap (repeatable)")
         if name == "run":
             command.add_argument("--write-only", action="store_true")
             command.add_argument("--section")
@@ -359,6 +367,18 @@ def main():
     if args.command == "check":
         print(check(args.case, args.section))
         return
+    phase_caps = REVISION_CAPS.copy()
+    if args.command == "revise":
+        selected = [s.strip() for s in args.phases.split(",")] if args.phases is not None else list(phase_caps)
+        if len(set(selected)) != len(selected) or any(s not in phase_caps for s in selected):
+            parser.error("--phases needs distinct names from " + ", ".join(phase_caps))
+        overrides = {}
+        for spec in args.phase_cap:
+            name, _, value = spec.partition("=")
+            if name not in selected or name in overrides or not re.fullmatch(r"[0-9]+", value) or int(value) < 1:
+                parser.error("--phase-cap needs one selected NAME=positive_integer per override")
+            overrides[name] = int(value)
+        phase_caps.update(overrides)
     remaining = args.max_tokens
     total = 0
     folder = args.case / "work/runs"
@@ -377,6 +397,7 @@ def main():
             ("revise", f"revise section {name} using /work/reviews/{name}.md and the completed "
              f"/work/clarifications/{name}.md. Save edits to /work/sections/{name}.md."),
         )
+        phases = [(phase, prompt) for phase, prompt in phases if phase in selected]
     elif args.command == "review":
         name = args.section
         phases = (("review", f"Review section {name}. "
@@ -408,10 +429,15 @@ def main():
                 continue
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
         if phase in REVISION_CAPS:
-            limit = min(limit, REVISION_CAPS[phase])
+            limit = min(limit, phase_caps[phase])
         cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
                                  phase=phase if phase in REVISION_CAPS else None)
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
+        if phase == "clarify":
+            next_number, conflicts = clarification_numbers(args.case)
+            prompt += f"\nNext free clarification number: {next_number}."
+            for number, locations in conflicts.items():
+                prompt += f"\nDuplicate clarification {number}: " + "; ".join(locations)
         state = {"messages": [HumanMessage(content=prompt)]}
         if phase == "verify-sources":
             top = (args.case / f"work/checks/{args.section}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]

@@ -15,6 +15,7 @@ citation_prefix: Source:\u0020
 comment_author: Renderer
 item_prefix: Item\u0020
 item_status: Open
+item_conflict_status: 编号冲突
 sheet_name: Items
 sheet_columns: Id|Section|Location|Content|Sources|Status|Answer|Responder
 sheet_fields: number|section|position|content|sources|status|answer|responder

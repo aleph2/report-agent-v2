@@ -836,3 +836,89 @@ def test_cli_revision_uses_review_model_for_all_four_phases(tmp_path, monkeypatc
     assert (tmp_path / "work/clarifications/demo.md").read_text() == "Clarified by audit model"
     assert (tmp_path / "work/reviews/demo-sources.md").read_text() == "Verified by audit model"
     assert (tmp_path / "work/reviews/demo.md").read_text() == "Reviewed by audit model"
+
+
+def test_clarification_collisions_check_export_and_resolution(tmp_path):
+    from xml.etree import ElementTree as ET
+    from zipfile import ZipFile
+
+    def rows():
+        cli.export_docx(tmp_path)
+        with ZipFile(tmp_path / "out/items.xlsx") as book:
+            sheet = ET.fromstring(book.read("xl/worksheets/sheet1.xml"))
+        return [["".join(cell.itertext()) for cell in row] for row in sheet.findall(".//{*}row")[1:]]
+
+    for folder in ("work/sections", "work/notes", "work/clarifications", "commission/template"):
+        (tmp_path / folder).mkdir(parents=True)
+    for name in ("a", "b"):
+        (tmp_path / f"work/sections/{name}.md").write_text("# Title\n\nText.")
+    (tmp_path / "work/notes/a.md").write_text("")
+    (tmp_path / "commission/template/settings.txt").write_text(
+        "answers_file: commission/澄清答复.md\nanswer_author: Owner\n")
+    answers = tmp_path / "commission/澄清答复.md"
+    answers.write_text("94: Scope answer\n29: Valid answer\n88: First\n88: Second\n")
+    item = "number: {}\nanchor: 「Text.」\ncontent: Question\n"
+    a = tmp_path / "work/clarifications/a.md"
+    a.write_text("\n---\n".join(item.format(i) for i in (94, 29, 88)))
+    b = tmp_path / "work/clarifications/b.md"
+    b.write_text(item.format(94) + "status: 已确认\n")
+    check = cli.check(tmp_path, "a").read_text()
+    assert "duplicate clarification 94: /work/clarifications/a.md:1" in check
+    assert "/work/clarifications/b.md:1" in check and "/commission/澄清答复.md:1" in check
+    assert "duplicate clarification 88:" in check and "/commission/澄清答复.md:3" in check and "/commission/澄清答复.md:4" in check
+    assert "duplicate clarification 29:" not in check
+    for _ in range(2):
+        data = rows()
+        assert [r[-3:] for r in data if r[0] in ("94", "88")] == [["编号冲突", "", ""]] * 3
+        assert next(r[-2:] for r in data if r[0] == "29") == ["Valid answer", "Owner"]
+    b.write_text(item.format(96))
+    answers.write_text("94: Scope answer\n29: Valid answer\n88: Settled\n")
+    data = rows()
+    assert next(r[-3:] for r in data if r[0] == "94") == ["Open", "Scope answer", "Owner"]
+    assert next(r[-3:] for r in data if r[0] == "96") == ["Open", "", ""]
+
+
+@pytest.mark.parametrize("answer_id,expected,total,clarify,revise", [
+    (90, 96, 100, 60, 220), (101, 102, 300000, 60000, 220000),
+])
+def test_selected_revision_phases_and_cap(tmp_path, monkeypatch, answer_id, expected, total, clarify, revise):
+    work = tmp_path / "work"
+    for folder in ("clarifications", "reviews", "sections"):
+        (work / folder).mkdir(parents=True)
+    (work / "reviews/demo.md").write_text("Preserved review")
+    (work / "sections/demo.md").write_text("Before")
+    (work / "clarifications/retired.txt").write_text("number: 95\n")
+    (tmp_path / "commission").mkdir()
+    (tmp_path / "commission/澄清答复.md").write_text(f"{answer_id}: Answer\n")
+    model = ScriptedModel(responses=[AIMessage(content="Done", usage_metadata={
+        "input_tokens": 6, "output_tokens": 1, "total_tokens": 7})])
+    limits = []
+    original = cli.TokenCapMiddleware
+    def cap(limit, **kwargs):
+        limits.append((kwargs["phase"], limit))
+        return original(limit, **kwargs)
+    monkeypatch.setattr(cli, "make_model", lambda phase: model)
+    monkeypatch.setattr(cli, "TokenCapMiddleware", cap)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo",
+                        "--max-tokens", str(total), "--phases", "clarify,revise",
+                        "--phase-cap", f"clarify={clarify}", "--phase-cap", f"revise={revise}"])
+    cli.main()
+    assert limits == [("clarify", clarify), ("revise", min(total - 7, revise))]
+    logs = sorted((work / "runs").glob("*.jsonl"))
+    assert len(logs) == 2
+    first = json.loads(logs[0].read_text().splitlines()[0])
+    assert first["type"] == "human" and f"Next free clarification number: {expected}" in first["content"]
+    assert (work / "reviews/demo.md").read_text() == "Preserved review"
+
+
+@pytest.mark.parametrize("options", [
+    ["--phases", "unknown"], ["--phases", "revise,revise"], ["--phases", ""],
+    ["--phase-cap", "revise"], ["--phase-cap", "unknown=20"], ["--phase-cap", "revise=0"],
+    ["--phase-cap", "review=20", "--phase-cap", "review=30"], ["--phases", "revise", "--phase-cap", "clarify=10"],
+])
+def test_invalid_revision_phase_options(tmp_path, monkeypatch, options):
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "s",
+                                     "--max-tokens", "100", *options])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2 and not (tmp_path / "work/runs").exists()

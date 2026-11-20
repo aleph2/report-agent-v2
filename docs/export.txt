@@ -46,6 +46,12 @@ header labels. An optional answers_file (N: answer) overrides matching answers
 with answer_author, leaving status unchanged. No completion is inferred.
 An explicit status supplied in the item overrides the retained/default status;
 the renderer does not derive a status from the answer's content.
+A repeated question number or repeated answer number makes the join ambiguous.
+The check command lists each conflicting number and every source file and line.
+One question and one answer are a normal pair. For all rows with a conflict,
+export writes item_conflict_status (default 编号冲突) and leaves answer and responder
+blank. Ambiguous rows from an older workbook are excluded when carrying answers
+forward. Keep the original workbook if it contains manually entered answers.
 
 The Markdown subset supports headings, paragraphs, simple lists, emphasis,
 pipe tables and inline citations. Formulas remain text; nested lists, fenced
