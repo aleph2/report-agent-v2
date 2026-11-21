@@ -1245,3 +1245,25 @@ def test_conditional_score_chain_in_checks(tmp_path, scenario, capsys):
     assert "clarification 43 line" not in check and "clarification 108 line" in check
     arithmetic = capsys.readouterr().out
     assert "56.49/III" in arithmetic and "56.00" in arithmetic and "65.91" not in arithmetic
+
+
+def test_sensitivity_clarifications_keep_adopted_scores_comparable(tmp_path):
+    work = tmp_path / "work"
+    for folder in ("sections", "clarifications", "notes"):
+        (work / folder).mkdir(parents=True)
+    (work / "notes/demo.md").write_text("")
+    section = "本坡基准值 F=62.31，Ⅳ级；另一高度算例 F=51.00，Ⅲ级。"
+    (work / "sections/demo.md").write_text(section)
+    (work / "clarifications/demo.md").write_text(
+        "number: 60\ncontent: 敏感性提示：暂按说明（1）内插，F=56.99（Ⅲ级）。\n"
+        "effect: 取 33.8 m 时 F=56.99；与岩性取值组合时 F=56.99−7.20=49.79。\n"
+        "number: 62\neffect: 单独改按板岩 F=62.31−7.20=55.11；与 33.8 m 高度组合（见上文）F=49.79。\n"
+        "number: 128\neffect: 现取 55；若按所述中值算法应为 62，F=55.86，仍Ⅲ级。\n"
+        "number: 200\neffect: 改按另一高度 F=51.00，Ⅲ级；现采用锚杆与挡墙组合，基准值 F=61.00，Ⅳ级。\n"
+        "number: 201\neffect: 敏感性分析：F=51.00，Ⅳ级。")
+    check = cli.check(tmp_path, "demo").read_text()
+    flags = [line for line in check.splitlines() if "F/grade" in line]
+    assert len(flags) == 2 and "clarification 200" in flags[0] and "61.00/IV" in flags[0]
+    assert "clarification 201" in flags[1] and "51.00/IV" in flags[1]
+    pairs = list(cli._grade_comparisons(tmp_path, "demo", [section]))
+    assert [row[-1] for row in pairs] == [None] * 6 + [True, False, False]

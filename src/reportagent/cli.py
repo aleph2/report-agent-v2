@@ -276,6 +276,8 @@ _VALUE = re.compile(r"-?\d+(?:\.\d+)?(?![\d.]|\s*[+*/×÷~～−-])")
 _NUMBER = r"-?\d+(?:\.\d+)?"
 _CHAIN = re.compile(rf"{_NUMBER}(?:\s*[+*/×÷−-]\s*{_NUMBER})+\s*=\s*")
 _SCENARIO = (r"若|假设|区间核算|同取区间|各指标同取|计入未定项区间|(?:组合|叠加)情形"
+             r"|组合时|(?:^|(?<=[。;；:：,，]))\s*(?:敏感性(?:提示|校核|核算|分析|情形)?(?:\s*[:：]|下|时|\s+)"
+             r"|(?:单独)?改按|与[^,，。;；:：()\n]*?组合)"
              r"|取[^,，。;；:：()\n]*?时|时\s*[,，]\s*F")
 _GRADE = r"(?P<grade>IV|III|II|I|[1-4])(?:\s*级|\b)"
 _GRADE_AFTER = re.compile(r"\s*(?:[>,≥≤<]\s*\d+(?:\.\d+)?)?[\s,，、:(]*(?:对应|为|属(?:于)?|grade\s*)?\s*" + _GRADE, re.I)
@@ -411,6 +413,9 @@ def _grade_comparisons(case, name, section):
             for is_baseline, score, grade in _risk_statements(line):
                 reference = baseline if is_baseline else section_values
                 pairs = [(s, g) for _, s, g in reference]
+                if is_baseline is False:
+                    # Questions can introduce alternatives. Only compare them to the same written score or standalone grade.
+                    pairs = [(s, g) for s, g in pairs if (s == score if score is not None else g == grade)]
                 comparable = [(s, g) for s, g in pairs if (score is None or s is not None)
                               and (grade is None or g is not None)]
                 if comparable:
