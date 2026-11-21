@@ -21,3 +21,5 @@ Write each finding as one line: label (content / method / process), location, wh
 End with a short list titled "可推广经验": general one-line lessons with no case facts.
 Save the review to /work/reviews/<name>.md, where <name> is this section's file stem.
 Do not edit the section.
+
+In the review phase, use calculate_score for every F, range endpoint and scenario figure written in the text.
