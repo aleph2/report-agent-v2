@@ -53,4 +53,4 @@ Going over a budget needs the owner's decision, recorded below.
 
 ## Decisions by the owner
 
-(none yet)
+- Task 80 (2026-11-21): Under the owner's delegation, Claude approved a separate `src/reportagent/learn.py` for learning records. This permits eight core Python modules for this extraction.

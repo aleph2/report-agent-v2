@@ -10,7 +10,8 @@ from tempfile import TemporaryDirectory
 from deepagents.backends import FilesystemBackend
 
 from reportagent.agent import PHASE_SKILLS
-from reportagent.cli import _file_operations, _fixture_digest, _recorded_turns, _replay_metrics
+from reportagent.cli import _fixture_digest, _replay_metrics
+from reportagent.learn import file_operations, recorded_turns
 
 
 def freeze(pack, phase, source, state, transcript, criteria):
@@ -50,7 +51,7 @@ def freeze(pack, phase, source, state, transcript, criteria):
         name = pack.name
         before = (work / f"work/sections/{name}.md").read_text(encoding="utf-8").splitlines()
         backend = FilesystemBackend(root_dir=work, virtual_mode=True)
-        for _, call, success in _file_operations(_recorded_turns(messages)):
+        for _, call, success in file_operations(recorded_turns(messages)):
             if success:
                 op = backend.edit if call["name"] == "edit_file" else backend.write
                 result = op(**call["args"])

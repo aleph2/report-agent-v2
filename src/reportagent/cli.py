@@ -21,6 +21,7 @@ from langchain.agents.middleware import ModelCallLimitMiddleware, wrap_model_cal
 from langchain_core.messages import AIMessage, HumanMessage
 from langsmith import tracing_context
 
+from . import learn
 from .agent import PHASE_SKILLS, build_agent
 from .budget import TokenCapMiddleware, estimate_input
 from .export.docx import clarification_numbers, export_docx
@@ -443,7 +444,7 @@ def _grade_comparisons(case, name, section):
                 yield number, line_no, score, grade, pairs, agrees
 
 
-def check(case, name):
+def check(case, name, *, output=None):
     case, findings = Path(case), []
     sources = (case / "sources").resolve()
     page_files, page_numbers = {}, {}
@@ -527,7 +528,7 @@ def check(case, name):
             findings.append(f"{location} | source file unspecified for absence wording: {match[0]}")
         if not refs and not bare:
             findings.append(f"{location} | no explicit file/page citation for absence wording")
-    output = case / f"work/checks/{name}.md"
+    output = output or case / f"work/checks/{name}.md"
     output.parent.mkdir(parents=True, exist_ok=True)
     inventory = [f"- indicator {label} | " + ("; ".join(entries) or "(no file/page citation)") for label, entries in indicators.items()] + inventory
     comparison = _verification_comparison(case, name, section, len(inventory))
@@ -571,10 +572,13 @@ def _preflight(case, section, phase, messages, cap):
         agent.invoke({"messages": messages})
 
 
-def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=None):
+def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=None, receipt=None):
     state = {"messages": messages}
     calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
     log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
+    if receipt is not None:
+        before = learn.snapshot(case, section, check, _risk_statements)
+        observation = learn.begin_phase(receipt, phase, log, limit, before)
     cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
                              phase=phase if phase in REVISION_CAPS else None, info=True, guard=True,
                              request_log=log.with_suffix(".requests.jsonl"))
@@ -610,6 +614,9 @@ def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=N
         if resume:
             lines.insert(resume[0], resume[1] + "\n")
         log.write_text("".join(lines), encoding="utf-8")
+        if receipt is not None:
+            after = learn.snapshot(case, section, check, _risk_statements)
+            learn.finish_phase(receipt, observation, log, after)
         used = state.get("total_tokens", 0)
         print(f"{phase} phase tokens: {used}")
         print(f"Reported tokens: {previous_total + used}")
@@ -617,41 +624,13 @@ def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=N
     return log, used
 
 
-def _recorded_turns(transcript):
-    turns = []
-    results = {}
-    for m in transcript:
-        if m.get("type") == "ai":
-            results = {}
-            synthetic = (m.get("response_metadata", {}).get("budget_stop") or
-                         (not m.get("tool_calls") and not m.get("usage_metadata")
-                          and str(m.get("content")).startswith("Token cap reached")))
-            if not synthetic:
-                turns.append((m, results))
-        elif m.get("type") == "tool":
-            results[m["tool_call_id"]] = m
-    return turns
-
-
-def _file_operations(turns):
-    for turn, (message, results) in enumerate(turns, 1):
-        for call in message.get("tool_calls") or []:
-            tool = call["name"]
-            if tool in ("edit_file", "write_file"):
-                reply = results.get(call["id"], {})
-                prefix = "Successfully replaced" if tool == "edit_file" else ("Updated file ", "Created file ", "Successfully wrote")
-                success = reply.get("status") == "success" and str(reply.get("content", "")).startswith(prefix)
-                yield turn, call, success if reply else None
-
-
-# These scores describe a replay trace and file changes; the model makes the engineering decisions.
 def _replay_metrics(case, name, phase, criteria, before, transcript):
     target = {"verify-sources": f"work/reviews/{name}-sources.md", "review": f"work/reviews/{name}.md",
               "clarify": f"work/clarifications/{name}.md", "revise": f"work/sections/{name}.md"}[phase]
-    turns = _recorded_turns(transcript)
+    turns = learn.recorded_turns(transcript)
     edits = applied = rejected = 0
     saves = []
-    for turn, call, success in _file_operations(turns):
+    for turn, call, success in learn.file_operations(turns):
         if call["name"] == "edit_file":
             edits += 1
             applied += int(success is True)
@@ -697,7 +676,7 @@ def _fixture_digest(root):
     return digest.hexdigest()
 
 
-def _replay(case, phases, historical_input, section):
+def _replay(case, phases, historical_input, section, receipt=None):
     case = case.resolve()
     root = case / "work/replay"
     packs = sorted(p for p in root.glob("*") if p.is_dir() and not p.name.startswith(".") and (section is None or p.name == section))
@@ -725,6 +704,8 @@ def _replay(case, phases, historical_input, section):
     reports = []
     remaining = sum(REPLAY_CAPS[phase] for phase in phases)
     name = pack.name
+    if receipt is not None:
+        receipt.update(section=name, cap=remaining)
     for phase, criteria, baseline in jobs:
         with TemporaryDirectory(dir=output) as directory:
             clone = Path(directory) / "case"
@@ -739,7 +720,7 @@ def _replay(case, phases, historical_input, section):
             else:
                 messages = _revision_messages(clone, name, phase)
             limit = min(REPLAY_CAPS[phase], remaining)
-            log, used = _run_phase(clone, phase, messages, limit, logs, section=name)
+            log, used = _run_phase(clone, phase, messages, limit, logs, section=name, receipt=receipt)
             remaining = max(0, remaining - used)
             transcript = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
             scores, details = _replay_metrics(clone, name, phase, criteria, before, transcript)
@@ -795,12 +776,24 @@ def main():
     selection.add_argument("--batch", choices=REPLAY_BATCHES)
     replay.add_argument("--section", help="exact frozen section name (required for a batch)")
     replay.add_argument("--historical-input", action="store_true", help="use the exact recorded leading messages")
+    learn.add_parser(commands)
+    for name in ("plan", "run", "review", "revise", "replay"):
+        commands.choices[name].add_argument("--task", type=int, help="operator-supplied task number for learning records")
     args = parser.parse_args()
+    if args.command == "learn":
+        return learn.command(args)
+    if args.command in ("plan", "run", "review", "revise", "replay") and not getattr(args, "preflight", False):
+        with learn.observe_run(args.case, getattr(args, "section", None), args.command, getattr(args, "max_tokens", None), args.task) as receipt:
+            return _execute(args, parser, receipt)
+    return _execute(args, parser, None)
+
+
+def _execute(args, parser, receipt):
     if args.command == "replay":
         if args.batch and not args.section:
             parser.error("--batch requires --section")
         phases = REPLAY_BATCHES[args.batch] if args.batch else [p for p, skill in PHASE_SKILLS.items() if skill == args.skill]
-        return _replay(args.case, phases, args.historical_input, args.section)
+        return _replay(args.case, phases, args.historical_input, args.section, receipt)
     if args.command in ("ingest", "export"):
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
@@ -880,6 +873,6 @@ def main():
         if preflight:
             _preflight(args.case, args.section, phase, messages, limit)
             continue
-        _, used = _run_phase(args.case, phase, messages, limit, folder, total, getattr(args, "section", None))
+        _, used = _run_phase(args.case, phase, messages, limit, folder, total, getattr(args, "section", None), receipt)
         total += used
         remaining = max(0, remaining - used)
