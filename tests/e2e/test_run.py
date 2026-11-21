@@ -650,8 +650,8 @@ def test_export_generic_template_and_explicit_items(tmp_path):
     (sections / "04-1-item.md").write_text("# Item\n\nItem text.")
     clar = work / "clarifications"; clar.mkdir()
     anchor = "Second sentence with bold, f_a0, Q^ml and R*W*X."
-    (clar / "02-context.md").write_text(f"number: 7\nanchor: 「{anchor}」\ncontent: Parameters & deformation need confirmation.\nsources: design.pdf, page 3\n\n---\n\nnumber: 9\nanchor: 「Not present.」\ncontent: Location needs confirmation.\nsources:\n")
-    (clar / "04-1-item.md").write_text("number: 31\nanchor: 「」\ncontent: Lithology uncertain.\nsources: design.pdf, page 4\n")
+    (clar / "02-context.md").write_text(f"number: 7\naudience: client\nanchor: 「{anchor}」\ncontent: Parameters & deformation need confirmation.\nsources: design.pdf, page 3\n\n---\n\nnumber: 9\naudience: client\nanchor: 「Not present.」\ncontent: Location needs confirmation.\nsources:\n")
+    (clar / "04-1-item.md").write_text("number: 31\naudience: client\nanchor: 「」\ncontent: Lithology uncertain.\nsources: design.pdf, page 4\n")
     before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     doc = Document(cli.export_docx(tmp_path)); table = doc.tables[0]
     assert len(doc.tables) == 2 and table.cell(1, 1).text == "42.6"
@@ -711,8 +711,8 @@ def test_export_explicit_numbers_preserve_owner_input(tmp_path, monkeypatch):
     plan = work / "plan.md"
     plan.write_text("---\nsection: 1|a\nsection: 1|b\n---\n")
     for name in ("a", "b"): (sections / f"{name}.md").write_text(f"# {name}\n\nBody sentence.")
-    a = clar / "a.md"; a.write_text("number: 11\nanchor: 「Body sentence.」\ncontent: First.\nsources:\n")
-    (clar / "b.md").write_text("number: 30\nanchor: 「」\ncontent: Second.\nsources:\n")
+    a = clar / "a.md"; a.write_text("number: 11\naudience: client\nanchor: 「Body sentence.」\ncontent: First.\nsources:\n")
+    (clar / "b.md").write_text("number: 30\naudience: client\nanchor: 「」\ncontent: Second.\nsources:\n")
     cli.export_docx(tmp_path); target = tmp_path / "out/items.xlsx"
     ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}; tag = "{" + ns["s"] + "}"
     with ZipFile(target) as z: parts = {n: z.read(n) for n in z.namelist()}
@@ -724,7 +724,7 @@ def test_export_explicit_numbers_preserve_owner_input(tmp_path, monkeypatch):
     with ZipFile(target, "w") as z:
         for n, data in parts.items(): z.writestr(n, data)
     plan.write_text("---\nsection: 1|b\nsection: 1|a\n---\n")
-    a.write_text(a.read_text().replace("First.", "First, clarified.") + "\n---\nnumber: 44\nanchor: 「」\ncontent: New.\nsources:\n")
+    a.write_text(a.read_text().replace("First.", "First, clarified.") + "\n---\nnumber: 44\naudience: client\nanchor: 「」\ncontent: New.\nsources:\n")
     word = Document(cli.export_docx(tmp_path))
     with ZipFile(target) as z:
         sheet = E.fromstring(z.read("xl/worksheets/sheet1.xml"))
@@ -733,7 +733,7 @@ def test_export_explicit_numbers_preserve_owner_input(tmp_path, monkeypatch):
     assert [r[0] for r in rows[1:]] == ["30", "11", "44"]
     assert rows[2][5:] == ["Answered", "=1+1", "Owner"] and rows[3][5:] == ["Open", "", ""]
     assert [c.text.split("\n", 1)[0] for c in word.comments] == ["Item 30", "Item 11", "Item 44"]
-    previous = target.read_bytes(); a.write_text(a.read_text() + "\n---\nnumber: 55\nanchor: 「」\ncontent: Pending.\nsources:\n")
+    previous = target.read_bytes(); a.write_text(a.read_text() + "\n---\nnumber: 55\naudience: client\nanchor: 「」\ncontent: Pending.\nsources:\n")
     replace = Path.replace
     def locked(self, destination):
         if Path(destination) == target: raise PermissionError("Workbook is open")
@@ -784,7 +784,7 @@ def test_export_client_fields_and_agent_order(tmp_path):
     text = ""
     for number, rank, effect in ((101, "3", "The word grade appears but this is descriptive."), (77, "", ""), (9, "2", "Score only."), (5, "1", "Grade may change.")):
         if text: text += "\n---\n"
-        text += f"number: {number}\nanchor: 「A body sentence.」\ncontent: Internal process detail {number}.\nsources: Evidence\nobject: Client slope\nquestion: {'Please confirm the height.' if rank else ''}\nrequired: Drawing\neffect: {effect}\nrank: {rank}\n"
+        text += f"number: {number}\naudience: client\nanchor: 「A body sentence.」\ncontent: Internal process detail {number}.\nsources: Evidence\nobject: Client slope\nquestion: {'Please confirm the height.' if rank else ''}\nrequired: Drawing\neffect: {effect}\nrank: {rank}\n"
         if number == 5: text += "status: Confirmed\n"
     (clar / "item.md").write_text(text)
     word = Document(cli.export_docx(tmp_path))
@@ -893,7 +893,7 @@ def test_clarification_collisions_check_export_and_resolution(tmp_path):
         "answers_file: commission/澄清答复.md\nanswer_author: Owner\n")
     answers = tmp_path / "commission/澄清答复.md"
     answers.write_text("94: Scope answer\n29: Valid answer\n88: First\n88: Second\n")
-    item = "number: {}\nanchor: 「Text.」\ncontent: Question\n"
+    item = "number: {}\naudience: client\nanchor: 「Text.」\ncontent: Question\n"
     a = tmp_path / "work/clarifications/a.md"
     a.write_text("\n---\n".join(item.format(i) for i in (94, 29, 88)))
     b = tmp_path / "work/clarifications/b.md"

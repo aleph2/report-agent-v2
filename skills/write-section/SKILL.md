@@ -28,3 +28,4 @@ The body has no 缺失与待补充事项 section or references such as 见第X�
 State missing evidence or uncertainty plainly; do not invent facts.
 If no notes file exists, write the section with every required item marked missing.
 After saving, reply in one line with the saved paths.
+Review supplied internal-file mentions and replace internal references in client-facing wording with the underlying engineering evidence or an explicit evidence gap.
