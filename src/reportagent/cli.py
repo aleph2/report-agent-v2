@@ -183,6 +183,10 @@ def _revision_input(case, name, phase, prompt):
     if phase == "clarify":
         next_number, conflicts = clarification_numbers(case)
         blocks.append(f"Next free clarification number: {next_number}.")
+        check = read(f"work/checks/{name}.md") or ""
+        flags = [line for line in check.splitlines() if re.match(r"^clarification (?:\d+|\?) line \d+: F/grade ", line)]
+        if flags:
+            blocks.append("Cross-file F/grade observations:\n" + "\n".join(flags))
         folder = root / "work/clarifications"
         paths.extend(path.relative_to(root).as_posix() for path in sorted(folder.glob("*.md"))
                      if path.name.startswith(f"{name}.pending."))
@@ -266,6 +270,10 @@ _SCORE = re.compile(
     r"(?P<baseline>(?:算术|现|当前)?基准值|(?:算术|现|当前)基准|baseline(?: score)?)\s*[:=为]?\s*(?:F\s*[:=为]\s*)?"
     r"|(?<![A-Za-z0-9])F\s*(?:值\s*)?(?:[:=为]|is\b)\s*", re.I)
 _VALUE = re.compile(r"-?\d+(?:\.\d+)?(?![\d.]|\s*[+*/×÷~～−-])")
+_NUMBER = r"-?\d+(?:\.\d+)?"
+_CHAIN = re.compile(rf"{_NUMBER}(?:\s*[+*/×÷−-]\s*{_NUMBER})+\s*=\s*")
+_SCENARIO = (r"若|假设|区间核算|同取区间|各指标同取|计入未定项区间|(?:组合|叠加)情形"
+             r"|取[^,，。;；:：()\n]*?时|时\s*[,，]\s*F")
 _GRADE = r"(?P<grade>IV|III|II|I|[1-4])(?:\s*级|\b)"
 _GRADE_AFTER = re.compile(r"\s*(?:[>,≥≤<]\s*\d+(?:\.\d+)?)?[\s,，、:(]*(?:对应|为|属(?:于)?|grade\s*)?\s*" + _GRADE, re.I)
 _GRADE_ONLY = re.compile(r"(?:风险等级|基准等级|risk grade|grade)\s*[:=为]?\s*" + _GRADE, re.I)
@@ -279,17 +287,25 @@ def _written_grade(match):
 def _risk_statements(line):
     line = unicodedata.normalize("NFKC", line)
     covered = set()
+
+    def baseline(explicit, offset):
+        prefix = re.split(r"[。;；]", line[:offset])[-1]
+        if re.search(_SCENARIO, prefix):
+            return False
+        return True if explicit else None  # Unlabelled scores can supply a baseline if none is named.
+
     for label in _SCORE.finditer(line):
-        value = _VALUE.match(line, label.end())
+        chain = _CHAIN.match(line, label.end())
+        value = _VALUE.match(line, chain.end() if chain else label.end())
         if not value:
             continue
         grade = _GRADE_AFTER.match(line, value.end())
         if grade:
             covered.add(grade.start("grade"))
-        yield bool(label["baseline"]), Decimal(value[0]), _written_grade(grade) if grade else None
+        yield baseline(label["baseline"], label.start()), Decimal(value[0]), _written_grade(grade) if grade else None
     for grade in _GRADE_ONLY.finditer(line):
         if grade.start("grade") not in covered:
-            yield "基准" in grade[0], None, _written_grade(grade)
+            yield baseline("基准" in grade[0], grade.start()), None, _written_grade(grade)
 
 
 def _score_arithmetic(path):
@@ -339,11 +355,10 @@ def _score_arithmetic(path):
             baseline = False
         if not baseline or not line or line.startswith(("#", "|")):
             continue
-        conditional = r"若|假设|区间核算|同取区间|各指标同取|计入未定项区间|取(?:上|下)限时|时\s*[,，]\s*F"
-        line = re.sub(r"\(([^()]*?)(?:" + conditional + r")[^()]*\)", r"(\1)", line)
+        line = re.sub(r"\(([^()]*?)(?:" + _SCENARIO + r")[^()]*\)", r"(\1)", line)
         statements = []
         for clause in re.split(r"[。；;]", line):
-            clause = re.split(conditional, clause, maxsplit=1)[0]
+            clause = re.split(_SCENARIO, clause, maxsplit=1)[0]
             # A reported range or a list of thresholds is not a single adopted grade.
             clause = re.sub(r"(?:IV|III|II|I)级\s*[~～–—至]\s*(?:IV|III|II|I)级", "", clause)
             clause = clause.replace("风险等级判定为", "风险等级为")
@@ -384,12 +399,14 @@ def _grade_comparisons(case, name, section):
     if clarifications.is_file():
         section_values = list(dict.fromkeys(item for line in section for item in _risk_statements(line)))
         baseline = [item for item in section_values if item[0]]
+        if not baseline:
+            baseline = [item for item in section_values if item[0] is None]
         number = "?"
         for line_no, line in enumerate(clarifications.read_text(encoding="utf-8").splitlines(), 1):
             if line.startswith("number:"):
                 number = line.partition(":")[2].strip()
             for is_baseline, score, grade in _risk_statements(line):
-                reference = baseline if is_baseline and baseline else section_values
+                reference = baseline if is_baseline else section_values
                 pairs = [(s, g) for _, s, g in reference]
                 comparable = [(s, g) for s, g in pairs if (score is None or s is not None)
                               and (grade is None or g is not None)]

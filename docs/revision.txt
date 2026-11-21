@@ -11,7 +11,8 @@ To reuse the existing verification and review, select the remaining phases and t
 --phases selects a comma-separated subset in workflow order. Repeat --phase-cap NAME=N
 for distinct selected phases. Each effective cap is limited by the remaining total.
 Clarify receives the next free clarification number (highest recorded plus one, or 1
-in an empty case) and each conflicting record with its file and line.
+in an empty case) and each conflicting record with its file and line. Its first
+message also includes this section's F/grade discrepancy lines from the latest check.
 
 Default phases and caps: verify-sources (80k), review (100k), clarify (40k),
 revise (80k). Each cap is also limited by the remaining CLI budget; unused

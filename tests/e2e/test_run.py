@@ -958,7 +958,10 @@ def test_invalid_revision_phase_options(tmp_path, monkeypatch, options):
 
 @pytest.mark.parametrize("has_source_check", [True, False])
 def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch, has_source_check):
-    paths = {"work/reviews/demo-sources.md": "Target source check", "work/reviews/other-sources.md": "Unrelated evidence",
+    flag = "clarification 43 line 8: F/grade 65.91/—; section states 56.49/III"
+    paths = {"work/checks/demo.md": "## Verification comparison\n" + flag + "\nNon-score finding",
+             "work/checks/other.md": flag.replace("43 line", "108 line"),
+             "work/reviews/demo-sources.md": "Target source check", "work/reviews/other-sources.md": "Unrelated evidence",
              "work/sections/demo.md": "# Section\n\n第1段\n第2段",
              "work/reviews/demo.md": "Review finding", "work/notes/demo.md": "Working notes",
              "work/clarifications/demo.md": "number: 94\ncontent: Design question",
@@ -982,6 +985,10 @@ def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch, has
     for rel in ("work/reviews/demo.md", "work/sections/demo.md", "work/clarifications/demo.md",
                 "work/clarifications/demo.pending.md", "commission/澄清答复.md"):
         assert rel in clarify and paths[rel] in clarify
+    assert flag in clarify and flag not in review and flag not in revise
+    assert "Non-score finding" not in clarify and paths["work/checks/other.md"] not in clarify
+    first = cli._revision_messages(tmp_path, "demo", "clarify")[0]
+    assert "work/checks/demo.md" not in first.response_metadata["supplied_files"]
     assert "Next free clarification number: 97" in clarify
     assert "/work/clarifications/method.md:4" in clarify
     assert "number: 94\ncontent: Scope question\n  continuation\nstatus: Open" in clarify
@@ -1208,3 +1215,20 @@ def test_arithmetic_mixed_conditional_and_adopted_baseline(tmp_path, conditional
         else:
             mismatch, = findings
             assert "68.59" in mismatch and "50.59" not in mismatch
+
+
+@pytest.mark.parametrize("scenario", ["若边坡加高", "组合情形", "取较大高度时", "叠加情形"])
+def test_conditional_score_chain_in_checks(tmp_path, scenario, capsys):
+    work = tmp_path / "work"
+    for kind in ("sections", "notes", "clarifications"):
+        (work / kind).mkdir(parents=True)
+    (work / "notes/demo.md").write_text("")
+    (work / "sections/demo.md").write_text(
+        "| 指标 | 基本分值 Rij | 权重 |\n|---|---|---|\n| X11 | 56.49 | 1 |\n\n## 结论\n"
+        f"{scenario}：F=56.49+4.62+4.80=65.91，Ⅳ级；本坡 F=30.00+26.00=56.00，Ⅲ级。\n")
+    (work / "clarifications/demo.md").write_text("number: 43\neffect: 组合情形 F=65.91，Ⅳ级。\n"
+                                                "number: 108\neffect: 基准值 F=65.91，Ⅳ级。")
+    check = cli.check(tmp_path, "demo").read_text()
+    assert "clarification 43 line" not in check and "clarification 108 line" in check
+    arithmetic = capsys.readouterr().out
+    assert "56.49/III" in arithmetic and "56.00" in arithmetic and "65.91" not in arithmetic
