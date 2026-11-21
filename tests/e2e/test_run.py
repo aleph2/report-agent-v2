@@ -52,7 +52,7 @@ def test_revision_phase_save_notice(tmp_path, phase, target, tool):
 
 
 @pytest.mark.parametrize("cap,gather_costs,write_cost,written", [
-    (300_000, [20_000] * 3, 20_000, 4), (180_000, [30_000] * 2, 30_000, 3),
+    (300_000, [20_000] * 3, 20_000, 4), (180_000, [30_000] * 3, 30_000, 2),
     (120_000, [30_000] * 2, 30_000, 2), (90_000, [54_000], 30_000, 0),
 ])
 def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, write_cost, written):
@@ -130,7 +130,7 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
     top = "# Source pages to review\n- indicator X11 | design.pdf, page 1\n"
     (tmp_path / paths["check"].lstrip("/")).write_text(top + "\n## Findings\nFinding omitted from the first message.\n")
     reads = [[paths["check"], "/sources/design/page-001.txt", "/sources/design/page-002.txt"],
-             [paths["sources"], paths["body"]], [paths[k] for k in ("review", "body", "clarify", "answers")],
+             [paths["sources"], paths["body"]], [],
              [paths[k] for k in ("clarify", "review", "body")]]
     saves = [call("write_file", file_path=paths[key], content="Checked") for key in ("sources", "review", "clarify")]
     saves.append(call("edit_file", file_path=paths["body"], old_string="Before", new_string="Revised"))
@@ -147,13 +147,13 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
         expected.append(min(maximum, budget - used)); used += len(pages) + 2
     assert limits == expected and sum(limits) <= 300000
     logs = sorted(phase_transcripts(tmp_path / "work/runs"))
-    assert sum(json.loads(line)["type"] == "ai" for log in logs for line in log.read_text().splitlines()) == len(replies)
+    assert sum(bool(json.loads(line).get("usage_metadata")) for log in logs for line in log.read_text().splitlines()) == len(replies)
     for log, phase, pages in zip(logs, ("verify-sources", "review", "clarify", "revise"), reads):
         messages = [json.loads(line) for line in log.read_text().splitlines()]
         assert log.name.endswith(f"-{phase}.jsonl") and phase in messages[int(phase == "verify-sources")]["content"]
         if phase == "verify-sources": assert messages[0]["content"] == top
         assert all(m["status"] == "success" for m in messages if m["type"] == "tool")
-        assert next(m for m in messages if m["type"] == "ai")["tool_calls"][0]["args"]["file_path"] == pages[0]
+        assert next(m for m in messages if m["type"] == "ai")["tool_calls"][0]["args"]["file_path"] == (pages[0] if pages else paths["clarify"])
     assert (tmp_path / paths["body"].lstrip("/")).read_text() == "Revised"
     assert all((tmp_path / paths[k].lstrip("/")).read_text() == "Checked" for k in ("sources", "review", "clarify"))
     assert (tmp_path / paths["answers"].lstrip("/")).read_text() == "Before"
@@ -312,7 +312,7 @@ def test_cli_write_only(tmp_path, monkeypatch, capsys, failure):
         assert transcript[-1]["type"] == "resume" and not (tmp_path / "work/sections").exists()
         return
     assert transcript[0]["content"] == "Write the section from the notes in /work/notes/."
-    assert notes in transcript[2]["content"] and transcript[-2]["type"] == "tool" and transcript[-2]["status"] == "success" and "3 * previous call" in transcript[-1]["content"]
+    assert notes in transcript[2]["content"] and transcript[-2]["type"] == "tool" and transcript[-2]["status"] == "success" and "previous input + output reserve" in transcript[-1]["content"]
     assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
     assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
 
@@ -398,7 +398,8 @@ def test_plan_then_named_section(tmp_path, monkeypatch):
         assert first["decision"] == "send"
         assert first["max_output_tokens"] == first["remaining_tokens"] - first["estimated_input_tokens"]
     assert set(logs) == {"plan", "gather", "write", "review"} and logs["plan"][0]["content"] == "Plan the report requested in /commission/."
-    assert logs["review"][0]["content"] == f"Review section {section}. Save the review to /work/reviews/{section}.md."
+    assert logs["review"][0]["content"].startswith(f"Review section {section}. Save the review to /work/reviews/{section}.md.")
+    assert "(unavailable: the verify phase saved nothing)" in logs["review"][0]["content"]
     for phase, folder in (("gather", "notes"), ("write", "sections")):
         prompt = logs[phase][0]["content"]
         assert section in prompt and f"## {section}" in prompt and "/work/plan.md" in prompt and f"/work/{folder}/{section}.md" in prompt and (phase != "write" or "/commission/" not in prompt)
@@ -457,7 +458,7 @@ def test_plan_and_review_receive_half_budget_note(tmp_path, monkeypatch, command
     plan = "## 01-synthetic\nSynthetic guidance."
     target = "/work/plan.md" if command == "plan" else "/work/reviews/01-synthetic.md"
     replies = [call("read_file", file_path="/commission/brief.md"), call("read_file", file_path="/commission/brief.md"), call("write_file", file_path=target, content=plan), AIMessage(content="Saved.")]
-    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n)}) for reply, n in zip(replies, [20000, 20000, 10000, 10000])])
+    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=1000, output_tokens=n-1000, total_tokens=n)}) for reply, n in zip(replies, [20000, 20000, 10000, 10000])])
     monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     section_args = ["--section", "01-synthetic"] if command == "review" else []
     monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "100000", *section_args])
@@ -945,8 +946,9 @@ def test_invalid_revision_phase_options(tmp_path, monkeypatch, options):
     assert error.value.code == 2 and not (tmp_path / "work/runs").exists()
 
 
-def test_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
-    paths = {"work/sections/demo.md": "# Section\n\n第1段\n第2段",
+def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
+    paths = {"work/reviews/demo-sources.md": "Target source check", "work/reviews/other-sources.md": "Unrelated evidence",
+             "work/sections/demo.md": "# Section\n\n第1段\n第2段",
              "work/reviews/demo.md": "Review finding", "work/notes/demo.md": "Working notes",
              "work/clarifications/demo.md": "number: 94\ncontent: Design question",
              "work/clarifications/demo.pending.md": "number: 96\ncontent: Proposed question",
@@ -960,9 +962,9 @@ def test_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
         "input_tokens": 1, "output_tokens": 0, "total_tokens": 1})])
     monkeypatch.setattr(cli, "make_model", lambda phase: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo",
-                                     "--max-tokens", "100000", "--phases", "clarify,revise"])
+                                     "--max-tokens", "100000", "--phases", "review,clarify,revise"])
     cli.main()
-    clarify, revise = [json.loads(f.read_text().splitlines()[0])["content"]
+    review, clarify, revise = [json.loads(f.read_text().splitlines()[0])["content"]
                        for f in sorted(phase_transcripts(tmp_path / "work/runs"))]
     for rel in ("work/reviews/demo.md", "work/sections/demo.md", "work/clarifications/demo.md",
                 "work/clarifications/demo.pending.md", "commission/澄清答复.md"):
@@ -975,6 +977,10 @@ def test_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
         assert rel in revise and paths[rel] in revise
     assert "1\t# Section\n2\t\n3\t第1段\n4\t第2段" in revise
     assert "Proposed question" not in revise
+    assert paths["commission/澄清答复.md"] in revise
+    for rel in ("work/reviews/demo-sources.md", "work/clarifications/demo.md", "commission/澄清答复.md", "work/notes/demo.md"):
+        assert paths[rel] in review
+    assert "3\t第1段" in review and "Unrelated evidence" not in review
 
 
 @pytest.mark.parametrize("middle,expected", [("B", "Alpha\nBeta\nGamma"), ("absent", "Alpha\nB\nGamma")])

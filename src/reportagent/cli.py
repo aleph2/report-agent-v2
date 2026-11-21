@@ -137,7 +137,8 @@ def _revision_input(case, name, phase, prompt):
     review = f"work/reviews/{name}.md"
     section = f"work/sections/{name}.md"
     official = f"work/clarifications/{name}.md"
-    paths = [review, section, official]
+    sources = f"work/reviews/{name}-sources.md"
+    paths = [sources if phase == "review" else review, section, official]
     blocks = [prompt]
     contents = {}
 
@@ -157,15 +158,16 @@ def _revision_input(case, name, phase, prompt):
         folder = root / "work/clarifications"
         paths.extend(path.relative_to(root).as_posix() for path in sorted(folder.glob("*.md"))
                      if path.name.startswith(f"{name}.pending."))
-        paths.append("commission/澄清答复.md")
     else:
         paths.append(f"work/notes/{name}.md")
+    paths.append("commission/澄清答复.md")
 
     for relative in paths:
         text = read(relative)
-        if text is not None and phase == "revise" and relative == section:
+        if text is not None and phase in ("review", "revise") and relative == section:
             text = "\n".join(f"{line_no}\t{line}" for line_no, line in enumerate(text.splitlines(), 1))
-        blocks.append(f"Case file: /{relative}\n" + (text if text is not None else "(unavailable)"))
+        missing = "(unavailable: the verify phase saved nothing)" if relative == sources else "(unavailable)"
+        blocks.append(f"Case file: /{relative}\n" + (text if text is not None else missing))
 
     for number, locations in conflicts.items():
         for location in locations:
@@ -445,7 +447,7 @@ def main():
         phases = (
             ("verify-sources", f"verify-sources for section {name} using the supplied list from /work/checks/{name}.md. "
              f"Save the source checks to /work/reviews/{name}-sources.md."),
-            ("review", f"review section {name}: read /work/reviews/{name}-sources.md first. "
+            ("review", f"review section {name} using the supplied case files. "
              f"Save the review to /work/reviews/{name}.md."),
             ("clarify", f"clarify section {name}: complete /work/clarifications/{name}.md "
              f"from /work/reviews/{name}.md, /work/sections/{name}.md and /commission/澄清答复.md."),
@@ -486,7 +488,7 @@ def main():
         if phase in REVISION_CAPS:
             limit = min(limit, phase_caps[phase])
         calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
-        if phase in ("clarify", "revise"):
+        if phase in ("review", "clarify", "revise"):
             prompt = _revision_input(args.case, args.section, phase, prompt)
         state = {"messages": [HumanMessage(content=prompt)]}
         if phase == "verify-sources":

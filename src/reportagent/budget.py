@@ -5,8 +5,7 @@ from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-
-OUTPUT_RESERVE = 8000
+from .models import PHASE_SETTINGS
 
 
 class TokenCapState(AgentState):
@@ -26,6 +25,13 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         self.info = info
         self.guard = guard
         self.request_log = request_log
+        self.output_reserve = PHASE_SETTINGS.get(phase, {}).get("output_reserve", 8000)
+        self.request_number = 0
+
+    def _log(self, **fields):
+        if self.request_log is not None:
+            with self.request_log.open("a", encoding="utf-8") as log:
+                log.write(json.dumps(dict(request=self.request_number, **fields)) + "\n")
 
     def _prepare(self, request):
         if not (self.info or self.guard):
@@ -35,14 +41,13 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         estimate = count_tokens_approximately(messages, tools=request.tools, chars_per_token=1.5, tokens_per_image=16384)
         remaining = self.max_tokens - request.state.get("total_tokens", 0)
         available = remaining - estimate
-        stop = self.guard and available < OUTPUT_RESERVE
+        stop = self.guard and available < self.output_reserve
         output = None if stop else (available if self.guard else remaining)
-        if self.request_log is not None:
-            with self.request_log.open("a", encoding="utf-8") as log:
-                log.write(json.dumps(dict(estimated_input_tokens=estimate, remaining_tokens=remaining,
-                                          max_output_tokens=output, decision="stop" if stop else "send")) + "\n")
+        self.request_number += 1
+        self._log(estimated_input_tokens=estimate, remaining_tokens=remaining, output_reserve=self.output_reserve,
+                  max_output_tokens=output, decision="stop" if stop else "send")
         if stop:
-            return AIMessage(content=f"Token cap reached before send: estimated input {estimate} + {OUTPUT_RESERVE} output "
+            return AIMessage(content=f"Token cap reached before send: estimated input {estimate} + {self.output_reserve} output "
                                      f"reserve exceeds {remaining} remaining tokens.",
                              response_metadata={"budget_stop": True})
         return request.override(model_settings={**request.model_settings, "max_completion_tokens": output})
@@ -69,8 +74,8 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         if total >= self.max_tokens:
             return self._end(total)
         previous = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
-        last_tokens = ((previous.usage_metadata or {}).get("total_tokens") or 0) if previous else 0
-        if total + 3 * last_tokens > self.max_tokens:
+        last_input = (previous.usage_metadata or {}).get("input_tokens") if previous else None
+        if last_input is not None and self.max_tokens - total < 2 * (last_input + self.output_reserve):
             if self.phase == "revise":
                 save = "In the revise phase, make all remaining edits now, as separate edit_file calls in this one response."
             elif self.phase == "clarify":
@@ -83,7 +88,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
                 save = "Save your work now in one write; do not read anything more."
             if self.info:
                 save += f" Remaining allowance: {self.max_tokens - total} tokens."
-            return {"final_save_rule": "reported total + 3 * previous call > cap", "messages": [HumanMessage(
+            return {"final_save_rule": "remaining < 2 * (previous input + output reserve)", "messages": [HumanMessage(
                 content="Token budget reached. " + save
             )]}
         # Keep pending tool calls and their results together before adding the note.
@@ -97,7 +102,11 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         reply = state["messages"][-1]
         if reply.response_metadata.get("budget_stop"):
             return {"total_tokens": state.get("total_tokens", 0)}
-        reported = (reply.usage_metadata or {}).get("total_tokens")
+        usage = reply.usage_metadata or {}
+        reported = usage.get("total_tokens")
+        if self.request_number:
+            self._log(event="response", input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
+                      reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning"), total_tokens=reported)
         total = state.get("total_tokens", 0) + (reported or 0)
         update = {"total_tokens": total, "usage_missing": state.get("usage_missing", False) or reported is None}
         return update

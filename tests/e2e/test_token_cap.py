@@ -45,7 +45,9 @@ def test_half_budget_note_preserves_pending_tools(tmp_path):
                call("write_file", file_path="/pending.txt", content="Tool executed."), AIMessage(content="Done.")]
     model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=tokens, output_tokens=0, total_tokens=tokens)})
                                      for reply, tokens in zip(replies, [2, 2, 2, 1])])
-    result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(12)]).invoke({"messages": [("user", "Write the section.")]})
+    cap = TokenCapMiddleware(12)
+    cap.output_reserve = 0  # This fixture uses single-digit token counts.
+    result = build_agent(tmp_path, model, middleware=[cap]).invoke({"messages": [("user", "Write the section.")]})
     notes = [(i, m) for i, m in enumerate(result["messages"]) if isinstance(m, HumanMessage) and m.text.startswith("You have used")]
     assert len(notes) == 1 and notes[0][0] == 7
     assert notes[0][1].text == "You have used 6 of 12 tokens. Save your work now from what you have; mark anything missing as missing."
@@ -67,14 +69,16 @@ def test_final_save_turn(tmp_path, costs, limit, calls, used, saved, writing):
     replies = [call("ls", path="/"), call("ls", path="/"), call("write_file", file_path="/saved.md", content="Saved.") if writing else AIMessage(content="No tool call.")]
     replies = [reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n) if n is not None else None}) for reply, n in zip(replies, costs)]
     model = ScriptedModel(responses=[*replies, AIMessage(content="Unused.")])
-    result = build_agent(tmp_path, model, middleware=[TokenCapMiddleware(limit)]).invoke({"messages": [("user", "Read the case.")]})
+    cap = TokenCapMiddleware(limit)
+    cap.output_reserve = 1  # One token reserved for the scripted write.
+    result = build_agent(tmp_path, model, middleware=[cap]).invoke({"messages": [("user", "Read the case.")]})
     assert model.i == calls and result["total_tokens"] == used
     notes = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.text == "Token budget reached. Save your work now in one write; do not read anything more."]
     assert len(notes) == int(saved) and (tmp_path / "saved.md").exists() is (saved and writing)
     if saved:
         if writing:
             assert (tmp_path / "saved.md").read_text() == "Saved." and result["messages"][-2].type == "tool" and result["messages"][-2].status == "success"
-        assert "3 * previous call" in result["messages"][-1].text
+        assert "previous input + output reserve" in result["messages"][-1].text
     else:
         assert "reported total >= cap" in result["messages"][-1].text
 
@@ -115,7 +119,7 @@ def test_preflight_budget_at_provider_boundary(tmp_path, info, guard):
         return httpx.Response(200, json={
             "id": "offline", "object": "chat.completion", "created": 1, "model": "offline",
             "choices": [{"index": 0, "finish_reason": "tool_calls" if "tool_calls" in message else "stop", "message": message}],
-            "usage": {"prompt_tokens": tokens - 1, "completion_tokens": 1, "total_tokens": tokens},
+            "usage": {"prompt_tokens": tokens - 1, "completion_tokens": 1, "completion_tokens_details": {"reasoning_tokens": 1}, "total_tokens": tokens},
         })
 
     with httpx.Client(transport=httpx.MockTransport(reply)) as client:
@@ -124,7 +128,12 @@ def test_preflight_budget_at_provider_boundary(tmp_path, info, guard):
         result = build_agent(tmp_path, model, phase="revise", middleware=[cap]).invoke(
             {"messages": [("user", "Revise.")]}
         )
-    entries = [json.loads(line) for line in log.read_text().splitlines()]
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    responses = [row for row in records if row.get("event") == "response"]
+    assert [row["request"] for row in responses] == list(range(1, len(payloads) + 1))
+    assert all(row["reasoning_tokens"] == 1 for row in responses)
+    entries = [row for row in records if "decision" in row]
+    assert all(row["output_reserve"] == 24_000 for row in entries)
     assert [entry["remaining_tokens"] for entry in entries] == [60_000, 1_000]
     if guard:
         assert len(payloads) == 1 and result["total_tokens"] == 59_000
@@ -166,7 +175,8 @@ def test_estimate_includes_system_tools_and_image(tmp_path):
         agent = create_agent(ScriptedModel(responses=[AIMessage(content="Done.")]), tools=[tool],
                              system_prompt=system, middleware=[cap])
         agent.invoke({"messages": [HumanMessage(content=blocks)]})
-        return json.loads(log.read_text().splitlines()[-1])["estimated_input_tokens"]
+        return next(row["estimated_input_tokens"] for line in reversed(log.read_text().splitlines())
+                    if "decision" in (row := json.loads(line)))
 
     text = [{"type": "text", "text": "One claim."}]
     base = estimate("Review.", "Read.", text)
@@ -174,3 +184,21 @@ def test_estimate_includes_system_tools_and_image(tmp_path):
     assert estimate("Review.", "Read. " * 500, text) > base + 100
     image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nm1cAAAAASUVORK5CYII="
     assert estimate("Review.", "Read.", [*text, {"type": "image_url", "image_url": {"url": image_url}}]) > base
+
+
+@pytest.mark.parametrize("phase,expected,reserve", [
+    ("verify-sources", 6000, 24000), ("review", 8000, 16000), ("clarify", 4000, 24000),
+    ("revise", 6000, 24000), ("write", None, 8000),
+])
+def test_phase_thinking_budget_opt_in(monkeypatch, phase, expected, reserve):
+    from reportagent import models
+    monkeypatch.setenv("MODEL_NAME", "draft")
+    monkeypatch.setenv("REVIEW_MODEL_NAME", "review-model")
+    monkeypatch.setenv("THINKING_BUDGET_MODEL", "review-model")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://offline.invalid/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "offline")
+    monkeypatch.setattr(models, "init_chat_model", lambda **options: options)
+    assert models.make_model(phase).get("extra_body", {}).get("thinking_budget") == expected
+    assert TokenCapMiddleware(100000, phase=phase).output_reserve == reserve
+    monkeypatch.setenv("REVIEW_MODEL_NAME", "other")
+    assert "extra_body" not in models.make_model(phase)
