@@ -2,6 +2,7 @@ import argparse
 import base64
 import json
 from hashlib import file_digest, sha256
+from itertools import count
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -63,7 +64,9 @@ def _source_document(sources, filename):
 def _verification_input(case, name, top):
     root = case.resolve()
     sources = root / "sources"
-    blocks = [{"type": "text", "text": top}]
+    numbers = count(1)
+    numbered = re.sub(r"(?m)^- ", lambda _: f"{next(numbers)}. ", top)
+    blocks = [{"type": "text", "text": numbered}]
     documents, claims, pages = {}, set(), {}
     pattern = r"(?: \| |; )(/work/(?:sections|notes)/" + re.escape(name) + r"\.md):(\d+):\d+ \| "
     # A location may appear first as an indicator, then as an absence entry needing its continuation.
@@ -135,7 +138,7 @@ def _verification_input(case, name, top):
                 blocks.append({"type": "text", "text": f"{label} unavailable ({type(error).__name__})"})
         attached += len(blocks) > before
 
-    return HumanMessage(content=blocks if len(blocks) > 1 else top)
+    return HumanMessage(content=blocks if len(blocks) > 1 else numbered)
 
 
 def _revision_messages(case, name, phase, prompt=None):

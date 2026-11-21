@@ -152,7 +152,7 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
     for log, phase, pages in zip(logs, ("verify-sources", "review", "clarify", "revise"), reads):
         messages = [json.loads(line) for line in log.read_text().splitlines()]
         assert log.name.endswith(f"-{phase}.jsonl") and phase in messages[int(phase == "verify-sources")]["content"]
-        if phase == "verify-sources": assert messages[0]["content"] == top
+        if phase == "verify-sources": assert messages[0]["content"] == top.replace("- indicator", "1. indicator")
         expected_status = ["success" if path.startswith("/sources/") else "error" for path in pages] + ["success"]
         assert [m["status"] for m in messages if m["type"] == "tool"] == expected_status
         assert next(m for m in messages if m["type"] == "ai")["tool_calls"][0]["args"]["file_path"] == (pages[0] if pages else paths["clarify"])
@@ -185,12 +185,24 @@ def test_verification_opens_with_cited_page(tmp_path, monkeypatch):
     first = generated.call_args_list[0].args[1]
     blocks = [b for m in first if m.type == "human" for b in m.content_blocks]
     texts = [b["text"] for b in blocks if b["type"] == "text"]
-    assert top in texts and any(claim in t for t in texts)
+    assert texts[0] == top.replace("- indicator X11", "1. indicator X11").replace("- indicator X12", "2. indicator X12")
+    assert any(claim in t for t in texts)
     assert any("/sources/design/page-001.txt" in t and page.read_text() in t for t in texts)
     assert sum("ANOTHER PAGE" in t for t in texts) == 1
     assert any("different claim" in t for t in texts)
     images = [b for b in blocks if b["type"] == "image"]
     assert len(images) == 1 and base64.b64decode(images[0]["base64"]) == page.with_suffix(".png").read_bytes()
+
+
+def test_verify_first_message_numbers_each_entry_and_preserves_the_checklist(tmp_path):
+    checklist = tmp_path / "work/checks/demo.md"
+    checklist.parent.mkdir(parents=True)
+    top = "# Source pages to review\n- indicator X11 | a\n- absence 缺 | b\n- absence 缺 | b\n"
+    original = top + "\n## Findings\nA finding"
+    checklist.write_text(original)
+    first = cli._revision_messages(tmp_path, "demo", "verify-sources")[0]
+    assert first.content == "# Source pages to review\n1. indicator X11 | a\n2. absence 缺 | b\n3. absence 缺 | b\n"
+    assert checklist.read_text() == original
 
 
 def test_verification_attaches_only_available_explicit_pages(tmp_path):
@@ -215,7 +227,8 @@ def test_verification_attaches_only_available_explicit_pages(tmp_path):
     assert sum("first page in range" in t for t in texts) == 1
     assert not any(s in t for t in texts for s in ("outside case sources", "outside range"))
     assert any("page-004.txt" in t and "unavailable" in t.lower() for t in texts)
-    assert cli._verification_input(tmp_path, "demo", top.replace(":1:1", ":15:1")).content == top.replace(":1:1", ":15:1")
+    missing = top.replace(":1:1", ":15:1")
+    assert cli._verification_input(tmp_path, "demo", missing).content == missing.replace("- absence", "1. absence")
 
 
 
