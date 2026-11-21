@@ -9,6 +9,10 @@ from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
 from langchain_core.messages import AIMessage
 
 
+PHASE_SKILLS = {"verify-sources": "verify-sources", "review": "review-section",
+                "clarify": "clarify-section", "revise": "write-section"}
+
+
 class RevisionState(AgentState):
     edit_batch: NotRequired[AIMessage | None]
     next_edit: NotRequired[int]
@@ -44,8 +48,7 @@ def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None
     skills = ["/work/skills/"]
     prompt = "You work on this report using the files in this case. Follow the available skills and save your work as case files."
     if phase:
-        skill = {"verify-sources": "verify-sources", "review": "review-section",
-                 "clarify": "clarify-section", "revise": "write-section"}[phase]
+        skill = PHASE_SKILLS[phase]
         prompt = files("reportagent.skills").joinpath(skill, "SKILL.md").read_text(encoding="utf-8")
         skills = None
     else:

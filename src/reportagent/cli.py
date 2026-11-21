@@ -1,11 +1,15 @@
 import argparse
 import base64
 import json
+from hashlib import file_digest, sha256
 import re
 import unicodedata
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from decimal import Decimal
 from pathlib import Path
+from shutil import copytree
+from tempfile import TemporaryDirectory, mkdtemp
 import sys
 
 from httpx import NetworkError, RemoteProtocolError, TimeoutException
@@ -15,7 +19,7 @@ from openai import APIConnectionError
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.messages import HumanMessage
 
-from .agent import build_agent
+from .agent import PHASE_SKILLS, build_agent
 from .budget import TokenCapMiddleware
 from .export.docx import clarification_numbers, export_docx
 from .ingest import ingest
@@ -272,6 +276,15 @@ def _verification_comparison(case, name, section, count):
         output.append(f"checklist entries={count}; distinct source-check IDs={len(ids)}; "
                       f"missing IDs={','.join(map(str, sorted(expected - ids))) or 'none'}; "
                       f"extra IDs={','.join(map(str, sorted(ids - expected))) or 'none'}; numbered rows={len(rows)}")
+    for number, line_no, score, grade, pairs, agrees in _grade_comparisons(case, name, section):
+        if agrees is False:
+            stated = ", ".join(dict.fromkeys(f"{s if s is not None else '—'}/{g or '—'}" for s, g in pairs))
+            output.append(f"clarification {number} line {line_no}: F/grade {score if score is not None else '—'}/{grade or '—'}; "
+                          f"section states {stated}")
+    return output
+
+
+def _grade_comparisons(case, name, section):
     clarifications = case / f"work/clarifications/{name}.md"
     if clarifications.is_file():
         section_values = list(dict.fromkeys(item for line in section for item in _risk_statements(line)))
@@ -291,11 +304,8 @@ def _verification_comparison(case, name, section, count):
                     scores = {s for s, _ in pairs if s is not None}
                     grades = {g for _, g in pairs if g is not None}
                     differs = (score is not None and scores and score not in scores) or (grade and grades and grade not in grades)
-                if differs:
-                    stated = ", ".join(dict.fromkeys(f"{s if s is not None else '—'}/{g or '—'}" for s, g in pairs))
-                    output.append(f"clarification {number} line {line_no}: F/grade {score if score is not None else '—'}/{grade or '—'}; "
-                                  f"section states {stated}")
-    return output
+                agrees = not differs if comparable or differs else None
+                yield number, line_no, score, grade, pairs, agrees
 
 
 def check(case, name):
@@ -400,6 +410,192 @@ def check(case, name):
     return output
 
 
+def _run_phase(case, phase, messages, limit, folder, previous_total=0):
+    state = {"messages": messages}
+    calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
+    log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
+    cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
+                             phase=phase if phase in REVISION_CAPS else None, info=True, guard=True,
+                             request_log=log.with_suffix(".requests.jsonl"))
+    config = {"configurable": {"thread_id": log.stem}, "max_concurrency": 1}
+    resume = None
+    try:
+        model = make_model(phase)
+        agent = build_agent(case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
+                            phase=phase if phase in REVISION_CAPS else None)
+        # Flush each checkpoint before advancing; avoids queued background writes.
+        try:
+            for state in agent.stream(state, config=config, stream_mode="values", durability="sync"):
+                pass
+        except (APIConnectionError, NetworkError, RemoteProtocolError, TimeoutException) as error:
+            state = agent.get_state(config).values
+            resume = (len(state["messages"]), json.dumps({
+                "type": "resume", "phase": phase, "thread_id": log.stem,
+                "error": type(error).__name__, "total_tokens": state.get("total_tokens", 0),
+            }))
+            # https://docs.langchain.com/oss/python/langgraph/checkpointers#choose-how-to-continue-a-thread
+            for state in agent.stream(None, config=config, stream_mode="values", durability="sync"):
+                pass
+    finally:
+        lines = [message.model_dump_json() + "\n" for message in state["messages"]]
+        if phase == "verify-sources":
+            for i, message in enumerate(state["messages"]):
+                if message.type == "ai":
+                    record = json.loads(lines[i])
+                    record["initial_request_input_tokens"] = (message.usage_metadata or {}).get("input_tokens")
+                    lines[i] = json.dumps(record, ensure_ascii=False) + "\n"
+                    break
+        if resume:
+            lines.insert(resume[0], resume[1] + "\n")
+        log.write_text("".join(lines), encoding="utf-8")
+        used = state.get("total_tokens", 0)
+        print(f"{phase} phase tokens: {used}")
+        print(f"Reported tokens: {previous_total + used}")
+        print("Run ended:", "error" if sys.exception() else state["messages"][-1].text)
+    return log, used
+
+
+def _recorded_turns(transcript):
+    turns = []
+    results = {}
+    for m in transcript:
+        if m.get("type") == "ai":
+            results = {}
+            synthetic = (m.get("response_metadata", {}).get("budget_stop") or
+                         (not m.get("tool_calls") and not m.get("usage_metadata")
+                          and str(m.get("content")).startswith("Token cap reached")))
+            if not synthetic:
+                turns.append((m, results))
+        elif m.get("type") == "tool":
+            results[m["tool_call_id"]] = m
+    return turns
+
+
+def _file_operations(turns):
+    for turn, (message, results) in enumerate(turns, 1):
+        for call in message.get("tool_calls") or []:
+            tool = call["name"]
+            if tool in ("edit_file", "write_file"):
+                reply = results.get(call["id"], {})
+                prefix = "Successfully replaced" if tool == "edit_file" else ("Updated file ", "Created file ", "Successfully wrote")
+                success = reply.get("status") == "success" and str(reply.get("content", "")).startswith(prefix)
+                yield turn, call, success if reply else None
+
+
+# These scores describe a replay trace and file changes; the model makes the engineering decisions.
+def _replay_metrics(case, name, phase, criteria, before, transcript):
+    target = {"verify-sources": f"work/reviews/{name}-sources.md", "review": f"work/reviews/{name}.md",
+              "clarify": f"work/clarifications/{name}.md", "revise": f"work/sections/{name}.md"}[phase]
+    turns = _recorded_turns(transcript)
+    edits = applied = rejected = 0
+    saves = []
+    for turn, call, success in _file_operations(turns):
+        if call["name"] == "edit_file":
+            edits += 1
+            applied += int(success is True)
+            rejected += int(success is False)
+        if success and Path(call["args"].get("file_path", "").lstrip("/")).as_posix() == target:
+            saves.append(turn)
+
+    section = (case / f"work/sections/{name}.md").read_text(encoding="utf-8").splitlines()
+    agreement = [row[-1] for row in _grade_comparisons(case, name, section)]
+    usage = [m.get("usage_metadata") or {} for m, _ in turns]
+    totals = [u.get("total_tokens") for u in usage]
+    reasoning = [(u.get("output_token_details") or {}).get("reasoning") for u in usage]
+    scores = dict(edits_submitted=edits, edits_applied=applied, edits_rejected=rejected,
+                  target_saved=int(bool(saves)), first_response_saved=int(1 in saves),
+                  duplicate_numbers=len(clarification_numbers(case)[1]), f_grade_agreements=agreement.count(True),
+                  f_grade_differences=agreement.count(False), total_tokens=sum(totals) if None not in totals else None,
+                  reasoning_tokens=sum(reasoning) if None not in reasoning else None)
+    details = dict(target=target, saved_on_responses=sorted(set(saves)), provider_responses=len(turns),
+                   edits_without_result=edits - applied - rejected, f_grade_unpaired=agreement.count(None),
+                   reasoning_tokens_reported=sum(n for n in reasoning if n is not None),
+                   reasoning_missing_responses=reasoning.count(None))
+    if phase == "verify-sources":
+        text = (case / target).read_text(encoding="utf-8") if saves else ""
+        ids = set(map(int, re.findall(r"^\s*\|\s*(\d+)(?=\s|\||[.、(（])", text, re.M)))
+        expected = set(criteria["expected_ids"])
+        scores["source_ids_saved"] = len(expected & ids)
+        details.update(saved_ids=sorted(ids), missing_ids=sorted(expected - ids), extra_ids=sorted(ids - expected))
+    if phase == "revise":
+        changes = {line for tag, a, b, _, _ in SequenceMatcher(None, before, section, autojunk=False).get_opcodes()
+                   if tag != "equal" for line in range(a + 1, b + 1)}
+        touched = [key for key, lines in criteria["finding_lines"].items() if saves and changes.intersection(lines)]
+        scores["must_fix_touched"] = len(touched)
+        details["touched_findings"] = touched
+    return scores, details
+
+
+def _fixture_digest(root):
+    digest = sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        with path.open("rb") as stream:
+            digest.update(file_digest(stream, "sha256").digest())
+    return digest.hexdigest()
+
+
+def _replay(case, skill):
+    case = case.resolve()
+    root = case / "work/replay"
+    packs = sorted(p for p in root.glob("*") if p.is_dir() and not p.name.startswith("."))
+    if not packs:
+        sys.exit(f"No frozen replay cases in {root}")
+    jobs = []
+    for pack in packs:
+        shared_hash = _fixture_digest(pack / "shared")
+        for phase, phase_skill in PHASE_SKILLS.items():
+            if skill == phase_skill:
+                fixture = pack / phase
+                messages = [HumanMessage.model_validate_json(line) for line in
+                            (fixture / "inputs.jsonl").read_text(encoding="utf-8").splitlines()]
+                criteria = json.loads((fixture / "criteria.json").read_text(encoding="utf-8"))
+                baseline = json.loads((fixture / "baseline.json").read_text(encoding="utf-8"))
+                manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"))
+                expected = manifest["files"]
+                files_match = all(sha256((fixture / f).read_bytes()).hexdigest() == expected[f]
+                                  for f in ("inputs.jsonl", "criteria.json", "baseline.json"))
+                if not files_match or shared_hash != manifest["shared_sha256"] or _fixture_digest(fixture / "state") != manifest["state_sha256"]:
+                    sys.exit(f"Frozen replay input changed: {fixture}")
+                jobs.append((pack, phase, messages, criteria, baseline))
+
+    output = Path(mkdtemp(prefix="reportagent-replay-", dir=case.parent))
+    print("Replay output:", output)
+    reports = []
+    for pack, phase, messages, criteria, baseline in jobs:
+        name = pack.name
+        with TemporaryDirectory(dir=output) as directory:
+            clone = Path(directory) / "case"
+            copytree(pack / "shared", clone)
+            copytree(pack / phase / "state", clone, dirs_exist_ok=True)
+            before = (clone / f"work/sections/{name}.md").read_text(encoding="utf-8").splitlines()
+            logs = output / name
+            logs.mkdir(exist_ok=True)
+            log, _ = _run_phase(clone, phase, messages, 60000, logs)
+            transcript = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            scores, details = _replay_metrics(clone, name, phase, criteria, before, transcript)
+            requests = [json.loads(line) for line in log.with_suffix(".requests.jsonl").read_text(encoding="utf-8").splitlines()]
+            stopped = any(row.get("decision") == "stop" for row in requests)
+            details["execution_status"] = ("blocked_before_send" if stopped and not details["provider_responses"]
+                                           else "stopped_by_guard" if stopped else "completed")
+            comparison = {}
+            for key, actual in scores.items():
+                prior = baseline[key]
+                if prior is None or actual is None:
+                    change = "unknown"
+                elif actual == prior:
+                    change = "same"
+                else:
+                    lower = key in ("duplicate_numbers", "f_grade_differences", "edits_submitted",
+                                    "edits_rejected", "total_tokens", "reasoning_tokens")
+                    change = "better" if (actual < prior) == lower else "worse"
+                comparison[key] = dict(baseline=prior, actual=actual, change=change)
+            result = dict(section=name, phase=phase, metrics=comparison, **details)
+            reports.append(result)
+            (output / "results.json").write_text(json.dumps(reports, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(json.dumps(result, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(prog="reportagent")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -417,7 +613,12 @@ def main():
         if name == "run":
             command.add_argument("--write-only", action="store_true")
             command.add_argument("--section")
+    replay = commands.add_parser("replay", help="compare one skill on frozen phase inputs")
+    replay.add_argument("case", type=Path)
+    replay.add_argument("--skill", required=True, choices=sorted(set(PHASE_SKILLS.values())))
     args = parser.parse_args()
+    if args.command == "replay":
+        return _replay(args.case, args.skill)
     if args.command in ("ingest", "export"):
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
@@ -487,51 +688,12 @@ def main():
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
         if phase in REVISION_CAPS:
             limit = min(limit, phase_caps[phase])
-        calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
         if phase in ("review", "clarify", "revise"):
             prompt = _revision_input(args.case, args.section, phase, prompt)
         state = {"messages": [HumanMessage(content=prompt)]}
         if phase == "verify-sources":
             top = (args.case / f"work/checks/{args.section}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]
             state["messages"].insert(0, _verification_input(args.case, args.section, top))
-        log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
-        cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
-                                 phase=phase if phase in REVISION_CAPS else None, info=True, guard=True,
-                                 request_log=log.with_suffix(".requests.jsonl"))
-        config = {"configurable": {"thread_id": log.stem}, "max_concurrency": 1}
-        resume = None
-        try:
-            model = make_model(phase)
-            agent = build_agent(args.case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
-                                phase=phase if phase in REVISION_CAPS else None)
-            # Flush each checkpoint before advancing; avoids queued background writes.
-            try:
-                for state in agent.stream(state, config=config, stream_mode="values", durability="sync"):
-                    pass
-            except (APIConnectionError, NetworkError, RemoteProtocolError, TimeoutException) as error:
-                state = agent.get_state(config).values
-                resume = (len(state["messages"]), json.dumps({
-                    "type": "resume", "phase": phase, "thread_id": log.stem,
-                    "error": type(error).__name__, "total_tokens": state.get("total_tokens", 0),
-                }))
-                # https://docs.langchain.com/oss/python/langgraph/checkpointers#choose-how-to-continue-a-thread
-                for state in agent.stream(None, config=config, stream_mode="values", durability="sync"):
-                    pass
-        finally:
-            lines = [message.model_dump_json() + "\n" for message in state["messages"]]
-            if phase == "verify-sources":
-                for i, message in enumerate(state["messages"]):
-                    if message.type == "ai":
-                        record = json.loads(lines[i])
-                        record["initial_request_input_tokens"] = (message.usage_metadata or {}).get("input_tokens")
-                        lines[i] = json.dumps(record, ensure_ascii=False) + "\n"
-                        break
-            if resume:
-                lines.insert(resume[0], resume[1] + "\n")
-            log.write_text("".join(lines), encoding="utf-8")
-            used = state.get("total_tokens", 0)
-            total += used
-            remaining = max(0, remaining - used)
-            print(f"{phase} phase tokens: {used}")
-            print(f"Reported tokens: {total}")
-            print("Run ended:", "error" if sys.exception() else state["messages"][-1].text)
+        _, used = _run_phase(args.case, phase, state["messages"], limit, folder, total)
+        total += used
+        remaining = max(0, remaining - used)
