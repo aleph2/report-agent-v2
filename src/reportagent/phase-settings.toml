@@ -20,3 +20,6 @@ output_reserve = 24000
 
 [checks]
 score_arithmetic = true
+
+[image_tokens]
+qwen4-max = 32

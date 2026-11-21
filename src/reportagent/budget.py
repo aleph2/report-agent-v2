@@ -1,11 +1,49 @@
+from base64 import b64decode
+from io import BytesIO
 import json
+import math
 from typing import NotRequired
+
+from PIL import Image
 
 from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from .models import PHASE_SETTINGS
+
+
+def _image_tokens(block, tile):
+    # https://www.alibabacloud.com/help/en/model-studio/vision/ — resized tiles plus two framing tokens.
+    image_url = block.get("image_url") or {}
+    detail = block.get("detail") or (image_url.get("detail") if isinstance(image_url, dict) else None)
+    max_pixels = block.get("max_pixels")
+    limit = max_pixels if isinstance(max_pixels, int) and max_pixels > 0 else (2621440 if detail in ("low", "auto") else 16777216)
+    limit = min(limit, 16777216)
+    ceiling = math.ceil(limit / tile**2) + 2
+    source = block.get("source")
+    data = block.get("base64") or (source.get("data") if isinstance(source, dict) else None)
+    if not data:
+        url = image_url.get("url", "") if isinstance(image_url, dict) else image_url
+        if not isinstance(url, str) or not url.startswith("data:") or ";base64," not in url:
+            return ceiling
+        data = url.partition(",")[2]
+    try:
+        # shortcut: an unavailable header (including an unusually large EXIF segment) costs the ceiling.
+        with Image.open(BytesIO(b64decode(data[:131072]))) as image:
+            width, height = image.size
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return ceiling
+    cols, rows = max(1, round(width / tile)), max(1, round(height / tile))
+    minimum = block.get("min_pixels")
+    minimum = min(minimum if isinstance(minimum, int) and minimum > 0 else 65536, limit)
+    if cols * rows * tile**2 > limit:
+        scale = math.sqrt(limit / (width * height))
+        cols, rows = math.floor(width * scale / tile), math.floor(height * scale / tile)
+    elif cols * rows * tile**2 < minimum:
+        scale = math.sqrt(minimum / (width * height))
+        cols, rows = math.ceil(width * scale / tile), math.ceil(height * scale / tile)
+    return min(ceiling, max(1, cols) * max(1, rows) + 2)
 
 
 class TokenCapState(AgentState):
@@ -27,6 +65,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         self.request_log = request_log
         self.output_reserve = PHASE_SETTINGS.get(phase, {}).get("output_reserve", 8000)
         self.request_number = 0
+        self._anchor = self._pending = None
 
     def _log(self, **fields):
         if self.request_log is not None:
@@ -37,8 +76,22 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         if not (self.info or self.guard):
             return request
         messages = ([request.system_message] if request.system_message else []) + request.messages
-        # Chinese engineering text is denser than the default English estimate.
-        estimate = count_tokens_approximately(messages, tools=request.tools, chars_per_token=1.5, tokens_per_image=16384)
+        tools = request.tools
+        tile = PHASE_SETTINGS["image_tokens"].get(getattr(request.model, "model_name", ""))
+        prompt = (messages, tools, request.model)
+        base, chars_per_token = 0, 1.5
+        if self._anchor is not None:
+            (previous, previous_tools, previous_model), tokens = self._anchor
+            if previous_model is request.model and previous_tools == tools and messages[:len(previous)] == previous:
+                base, messages, tools = tokens, messages[len(previous):], None
+                # The Chinese text delta in Task 60 review call 7 used 18% more than the full-prompt text heuristic.
+                chars_per_token = 1.25
+        # The provider already counted the matching prefix, including tool schemas.
+        estimate = base + count_tokens_approximately(messages, tools=tools, chars_per_token=chars_per_token,
+                                                      tokens_per_image=0 if tile else 16384)
+        if tile:
+            estimate += sum(_image_tokens(block, tile) for message in messages if isinstance(message.content, list)
+                            for block in message.content if isinstance(block, dict) and block.get("type") in ("image", "image_url"))
         remaining = self.max_tokens - request.state.get("total_tokens", 0)
         available = remaining - estimate
         stop = self.guard and available < self.output_reserve
@@ -50,6 +103,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
             return AIMessage(content=f"Token cap reached before send: estimated input {estimate} + {self.output_reserve} output "
                                      f"reserve exceeds {remaining} remaining tokens.",
                              response_metadata={"budget_stop": True})
+        self._pending = prompt
         return request.override(model_settings={**request.model_settings, "max_completion_tokens": output})
 
     def wrap_model_call(self, request, handler):
@@ -103,6 +157,8 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         if reply.response_metadata.get("budget_stop"):
             return {"total_tokens": state.get("total_tokens", 0)}
         usage = reply.usage_metadata or {}
+        measured = usage.get("input_tokens")
+        self._anchor = (self._pending, measured) if self._pending is not None and measured is not None else None
         reported = usage.get("total_tokens")
         if self.request_number:
             self._log(event="response", input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),

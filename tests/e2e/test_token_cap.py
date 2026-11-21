@@ -142,6 +142,7 @@ def test_preflight_budget_at_provider_boundary(tmp_path, monkeypatch, info, guar
     entries = [row for row in records if "decision" in row]
     assert all(row["output_reserve"] == 24_000 for row in entries)
     assert [entry["remaining_tokens"] for entry in entries] == [60_000, 1_000]
+    assert responses[0]["input_tokens"] <= entries[1]["estimated_input_tokens"] < 60_000
     if guard:
         assert len(payloads) == 1 and result["total_tokens"] == 59_000
         assert entries[-1]["decision"] == "stop" and "cap" in result["messages"][-1].text.lower()
@@ -211,3 +212,37 @@ def test_phase_thinking_budget_opt_in(monkeypatch, phase, expected, reserve):
     assert TokenCapMiddleware(100000, phase=phase).output_reserve == reserve
     monkeypatch.setenv("REVIEW_MODEL_NAME", "other")
     assert "extra_body" not in models.make_model(phase)
+
+
+def test_provider_anchor_prices_only_new_image_tiles(tmp_path):
+    from base64 import b64encode
+    from io import BytesIO
+    from types import SimpleNamespace
+    from PIL import Image
+    from langchain.agents.middleware import ModelRequest
+
+    data = BytesIO()
+    Image.new("RGB", (1120, 1600)).save(data, format="PNG")
+    block = {"type": "image", "mime_type": "image/png", "base64": b64encode(data.getvalue()).decode()}
+    cap = TokenCapMiddleware(100000, phase="revise", guard=True, request_log=tmp_path / "calls")
+    q = HumanMessage("Review this page.")
+    request = ModelRequest(model=SimpleNamespace(model_name="qwen4-max"), messages=[q], tools=[], state={"total_tokens": 0})
+    cap._prepare(request)
+    reply = AIMessage(content="Read", usage_metadata={"input_tokens": 20000, "output_tokens": 10, "total_tokens": 20010})
+    cap.after_model({"messages": [reply]}, None)
+    added = HumanMessage(content=[block, block, block])
+    cap._prepare(request.override(messages=[q, reply, added], state={"total_tokens": 20010}))
+    rows = [json.loads(l) for l in (tmp_path / "calls").read_text().splitlines()]
+    assert rows[-1]["decision"] == "send"
+    assert 25256 <= rows[-1]["estimated_input_tokens"] < 25300
+    # A different prefix cannot inherit the old provider count.
+    cap._prepare(request.override(messages=[HumanMessage(content=[block])]))
+    assert 1752 <= json.loads((tmp_path / "calls").read_text().splitlines()[-1])["estimated_input_tokens"] < 1770
+
+
+def test_unavailable_image_uses_detail_ceiling():
+    from reportagent.budget import _image_tokens
+
+    remote = {"type": "image_url", "image_url": {"url": "https://example.invalid/page.png", "detail": "low"}}
+    assert _image_tokens(remote, 32) == 2562
+    assert _image_tokens({"type": "image", "base64": "invalid"}, 32) == 16386
