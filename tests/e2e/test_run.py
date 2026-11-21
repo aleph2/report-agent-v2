@@ -30,7 +30,7 @@ def phase_transcripts(folder):
     ("clarify", "clarifications/demo", "write_file"),
     ("revise", "sections/demo", "edit_file"),
 ])
-def test_revision_phase_save_notice(tmp_path, phase, target, tool):
+def test_revision_phase_save_notice(tmp_path, monkeypatch, phase, target, tool):
     from reportagent.budget import TokenCapMiddleware
     destination = f"/work/{target}.md"
     before, saved = ("Before first\nBefore second", "Saved first\nSaved second") if phase == "revise" else ("Before", "Saved")
@@ -38,16 +38,27 @@ def test_revision_phase_save_notice(tmp_path, phase, target, tool):
     allowed = (call(tool, file_path=destination, old_string=before, new_string=saved) if tool == "edit_file"
                else call(tool, file_path=destination, content=saved))
     costs = dict(input_tokens=30, output_tokens=0, total_tokens=30)
-    model = ScriptedModel(responses=[call("read_file", file_path="/index.md").model_copy(update={"usage_metadata": costs}),
+    first = (call("read_file", file_path="/index.md") if phase == "verify-sources" else
+             call("calculate_score", scores={"X1": 50}, weights={"X1": 1}))
+    model = ScriptedModel(responses=[first.model_copy(update={"usage_metadata": costs}),
                                     allowed.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)})])
+    offered = []
+    original = ScriptedModel.bind_tools
+    def capture(self, tools, **kwargs):
+        offered.append([tool.name for tool in tools])
+        return original(self, tools, **kwargs)
+    monkeypatch.setattr(ScriptedModel, "bind_tools", capture)
     result = cli.build_agent(tmp_path, model, phase=phase, section="demo",
                              middleware=[TokenCapMiddleware(100, phase=phase)]).invoke({"messages": [("user", "Save.")]})
-    notice = next(m.content for m in result["messages"] if m.type == "human" and "Token budget reached" in m.content)
-    assert phase in notice and tool in notice and "one write" not in notice
-    if phase == "revise":
-        assert "separate edit_file calls in this one response" in notice
+    assert first.tool_calls[0]["name"] in offered[0] and offered[1:] == [[tool]]
+    if phase != "verify-sources":
+        calculation = next(m for m in result["messages"] if m.type == "tool" and m.name == "calculate_score")
+        assert json.loads(calculation.text)["base"]["F"] == "50.00"
+    notice = [m.text for m in result["messages"] if m.type == "human"][-1]
+    assert notice.startswith(FINAL_SAVE + " ")
     if phase == "clarify":
-        assert "official clarification file" in notice and "separate draft" in notice
+        assert notice.endswith("Keep every existing item and its number, except an evidenced collision renumbering. "
+                               "Do not write a separate draft.")
     assert file.read_text() == saved and result["total_tokens"] == 31
     assert sum(m.type == "ai" and bool(m.usage_metadata) for m in result["messages"]) == 2
 
@@ -102,9 +113,8 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, write_cost, w
         assert draft[0]["content"] == "Write the section from the notes in /work/notes/."
         notices = [m["content"] for m in draft[1:] if m["type"] == "human"]
         remaining = cap - gathered - (written - 1) * write_cost
-        save_notice = ("Token budget reached. Save your work now in one write; do not read anything more. "
-                       f"Remaining allowance: {remaining} tokens.")
-        assert notices == ([save_notice] if written < 4 else [])
+        expected = f"{FINAL_SAVE} Save your work now in one write; do not read anything more. Remaining allowance: {remaining} tokens."
+        assert notices == ([expected] if written < 4 else [])
     assert [sum((m.get("usage_metadata") or {}).get("total_tokens", 0) for m in log) for log in (research, draft)] == [gathered, written * write_cost]
     output = capsys.readouterr().out
     assert f"Reported tokens: {gathered + written * write_cost}" in output
@@ -185,7 +195,8 @@ def test_verification_opens_with_cited_page(tmp_path, monkeypatch):
     first = generated.call_args_list[0].args[1]
     blocks = [b for m in first if m.type == "human" for b in m.content_blocks]
     texts = [b["text"] for b in blocks if b["type"] == "text"]
-    assert texts[0] == top.replace("- indicator X11", "1. indicator X11").replace("- indicator X12", "2. indicator X12")
+    assert texts[1] == top.replace("- indicator X11", "1. indicator X11").replace("- indicator X12", "2. indicator X12")
+    assert "Files already included in your first message: /sources/design/page-001.txt, /sources/design/page-001.png, /sources/design/page-002.txt" in texts
     assert any(claim in t for t in texts)
     assert any("/sources/design/page-001.txt" in t and page.read_text() in t for t in texts)
     assert sum("ANOTHER PAGE" in t for t in texts) == 1
@@ -413,7 +424,7 @@ def test_plan_then_named_section(tmp_path, monkeypatch):
         assert first["decision"] == "send"
         assert first["max_output_tokens"] == first["remaining_tokens"] - first["estimated_input_tokens"]
     assert set(logs) == {"plan", "gather", "write", "review"} and logs["plan"][0]["content"] == "Plan the report requested in /commission/."
-    assert logs["review"][0]["content"].startswith(f"Review section {section}. Save the review to /work/reviews/{section}.md.")
+    assert f"Review section {section}. Save the review to /work/reviews/{section}.md." in logs["review"][0]["content"].splitlines()
     assert "(unavailable: the verify phase saved nothing)" in logs["review"][0]["content"]
     for phase, folder in (("gather", "notes"), ("write", "sections")):
         prompt = logs[phase][0]["content"]
@@ -996,6 +1007,10 @@ def test_revision_preflight_matches_live_guard_without_running(tmp_path, monkeyp
     assert "conservative_requests=1" in run(conservative_two - 1, "--preflight")
     report = run(conservative_two, "--preflight")
     assert "conservative_requests=2" in report and "fewer than 2" not in report
+    three = 3 * (estimate + reserve)
+    assert f"conservative_floor_3={three}" in row
+    assert "conservative_requests=2" in run(three - 1, "--preflight", "--phase-cap", f"review={three}")
+    assert "conservative_requests=3" in run(three, "--preflight", "--phase-cap", f"review={three}")
     assert list(tmp_path.rglob("*.md")) == [section] and not (tmp_path / "work/runs").exists()
 
     model.responses = [AIMessage(content="Done.", usage_metadata={"input_tokens": 2, "output_tokens": 1, "total_tokens": 3})]
@@ -1189,7 +1204,7 @@ def test_arithmetic_thresholds_and_exact_tolerance(tmp_path, score, grade):
     assert "unavailable" in next(cli._score_arithmetic(source))
 
 
-FIRST_COPY = "This file is already in your first message; use that copy."
+FINAL_SAVE = "This is the last response this phase can make; save your file now."
 READ_SCOPE = "This phase may read /sources/ pages (find them in /index.md) and save its own file."
 
 
@@ -1227,8 +1242,15 @@ def test_restricted_file_results_match_actual_inputs(tmp_path, monkeypatch, phas
     blocked = [read(supplied), read(other), read("near/index.md"), read("work/notes/demo.md"),
                read("sources/../near/index.md"), read("sources/../" + supplied), read("work/plan.md")]
     expected = [("error", READ_SCOPE)] * len(blocked)
-    if phase != "verify-sources" or full_check:
-        expected[0] = ("error", FIRST_COPY)
+    included = {
+        "verify-sources": [check] if full_check else [],
+        "review": [sources, section, "work/clarifications/demo.md"],
+        "clarify": [review, section, "work/clarifications/demo.md"],
+        "revise": [review, section, "work/clarifications/demo.md"],
+    }[phase]
+    manifest = "Files already included in your first message: " + ", ".join("/" + name for name in included)
+    if included:
+        expected = [("error", READ_SCOPE + " " + manifest)] * len(blocked)
     if phase in ("verify-sources", "review"):
         wrong = review if phase == "verify-sources" else sources
         blocked += [call("write_file", file_path="/" + name, content="forbidden") for name in (wrong, "work/reviews/other.md")]
@@ -1246,6 +1268,8 @@ def test_restricted_file_results_match_actual_inputs(tmp_path, monkeypatch, phas
     log, = phase_transcripts(work / "runs")
     messages = [json.loads(line) for line in log.read_text().splitlines()]
     tools = [m for m in messages if m["type"] == "tool"]
+    if included:
+        assert manifest in messages[0]["content"].splitlines()
     assert [(m["status"], m["content"]) for m in tools[:len(blocked)]] == expected
     assert "Source page index" in tools[-3]["content"] and "Page content" in tools[-2]["content"]
     assert (tmp_path / target).read_text() == "Saved" and not (work / "reviews/other.md").exists()

@@ -22,7 +22,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langsmith import tracing_context
 
 from . import learn
-from .agent import PHASE_SKILLS, build_agent, score_result
+from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
 from .budget import TokenCapMiddleware, estimate_input
 from .export.docx import clarification_numbers, export_docx
 from .ingest import ingest
@@ -108,6 +108,7 @@ def _verification_input(case, name, top):
 
     # Bound initial request size; remaining pages are available to read_file.
     available_bytes = 8 * 1024 * 1024
+    supplied = []
     attached = 0
     for (pdf, start), filename in pages.items():
         if attached == 10:
@@ -135,12 +136,13 @@ def _verification_input(case, name, top):
                     image = base64.b64encode(page.read_bytes()).decode("ascii")
                     blocks.extend([{"type": "text", "text": label},
                                    {"type": "image", "mime_type": "image/png", "base64": image}])
+                supplied.append(page.relative_to(root).as_posix())
                 available_bytes -= size
             except (OSError, UnicodeError) as error:
                 blocks.append({"type": "text", "text": f"{label} unavailable ({type(error).__name__})"})
         attached += len(blocks) > before
 
-    return HumanMessage(content=blocks if len(blocks) > 1 else numbered)
+    return HumanMessage(content=blocks if len(blocks) > 1 else numbered, response_metadata={"supplied_files": supplied})
 
 
 def _revision_messages(case, name, phase, prompt=None):
@@ -160,7 +162,7 @@ def _revision_messages(case, name, phase, prompt=None):
         top = text.partition("\n## Findings")[0]
         message = _verification_input(case, name, top)
         if top == text:
-            message.response_metadata["supplied_files"] = [checklist]
+            message.response_metadata["supplied_files"].insert(0, checklist)
         return [message, HumanMessage(content=prompt)]
     return [_revision_input(case, name, phase, prompt)]
 
@@ -560,7 +562,8 @@ def _preflight(case, section, phase, messages, cap):
         affordable = max(0, (cap - reserve + expected) // (first + expected))
         conservative = max(0, cap // (first + reserve))
         print(f"phase={phase} cap={cap} estimated_first_input={first} output_reserve={reserve} "
-              f"expected_output={expected} affordable_requests={affordable} conservative_requests={conservative}")
+              f"expected_output={expected} affordable_requests={affordable} conservative_requests={conservative} "
+              f"conservative_floor_3={3 * (first + reserve)}")
         if conservative < 2:
             print(f"{phase}: conservative estimate affords fewer than 2 requests.")
         return AIMessage(content="Preflight complete.")
@@ -869,6 +872,11 @@ def _execute(args, parser, receipt):
             limit = min(limit, phase_caps[phase])
         messages = (_revision_messages(args.case, args.section, phase, prompt) if phase in REVISION_CAPS
                     else [HumanMessage(content=prompt)])
+        first = messages[0]
+        if supplied := first.response_metadata.get("supplied_files"):
+            notice = supplied_notice(supplied)
+            first.content = ([{"type": "text", "text": notice}, *first.content] if isinstance(first.content, list)
+                             else notice + "\n\n" + first.content)
         if preflight:
             _preflight(args.case, args.section, phase, messages, limit)
             continue

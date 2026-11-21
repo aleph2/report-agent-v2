@@ -46,13 +46,17 @@ def calculate_score(scores: dict[str, Score], weights: dict[str, Weight],
     return {"base": evaluate(scores), "scenarios": [evaluate(scores | overrides) for overrides in scenarios]}
 
 
+def supplied_notice(paths):
+    return "Files already included in your first message: " + ", ".join("/" + path for path in paths)
+
+
 class PhaseTools(AgentMiddleware):
     def __init__(self, phase, policy, case, section, supplied_files):
         self.score_tool = ("calculate_score",) if phase in SCORE_PHASES else ()
         self.action = "edit_file" if phase == "revise" else "write_file"
         self.policy = policy
         self.case = case.resolve()
-        self.supplied = frozenset(supplied_files)
+        self.supplied = supplied_files
         self.review_phase = phase in ("verify-sources", "review")
         self.target = None
         if self.review_phase and section and Path(section).name == section:
@@ -87,8 +91,8 @@ class PhaseTools(AgentMiddleware):
         if call["name"] == "read_file":
             if path.is_relative_to(self.case / "sources") or (relative == "index.md" and path == self.case / "index.md"):
                 return None
-            if relative in self.supplied:
-                message = "This file is already in your first message; use that copy."
+            if self.supplied:
+                message += " " + supplied_notice(self.supplied)
         if call["name"] == self.action and (not self.review_phase or path == self.target):
             return None
         return ToolMessage(content=message, tool_call_id=call["id"], status="error")
