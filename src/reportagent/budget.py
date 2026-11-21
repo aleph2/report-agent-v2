@@ -46,6 +46,16 @@ def _image_tokens(block, tile):
     return min(ceiling, max(1, cols) * max(1, rows) + 2)
 
 
+def estimate_input(messages, tools, model, chars_per_token=1.5):
+    tile = PHASE_SETTINGS["image_tokens"].get(getattr(model, "model_name", ""))
+    tokens = count_tokens_approximately(messages, tools=tools, chars_per_token=chars_per_token,
+                                        tokens_per_image=0 if tile else 16384)
+    if tile:
+        tokens += sum(_image_tokens(block, tile) for message in messages if isinstance(message.content, list)
+                      for block in message.content if isinstance(block, dict) and block.get("type") in ("image", "image_url"))
+    return tokens
+
+
 class TokenCapState(AgentState):
     total_tokens: NotRequired[int]
     usage_missing: NotRequired[bool]
@@ -77,7 +87,6 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
             return request
         messages = ([request.system_message] if request.system_message else []) + request.messages
         tools = request.tools
-        tile = PHASE_SETTINGS["image_tokens"].get(getattr(request.model, "model_name", ""))
         prompt = (messages, tools, request.model)
         base, chars_per_token = 0, 1.5
         if self._anchor is not None:
@@ -86,12 +95,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
                 base, messages, tools = tokens, messages[len(previous):], None
                 # The Chinese text delta in Task 60 review call 7 used 18% more than the full-prompt text heuristic.
                 chars_per_token = 1.25
-        # The provider already counted the matching prefix, including tool schemas.
-        estimate = base + count_tokens_approximately(messages, tools=tools, chars_per_token=chars_per_token,
-                                                      tokens_per_image=0 if tile else 16384)
-        if tile:
-            estimate += sum(_image_tokens(block, tile) for message in messages if isinstance(message.content, list)
-                            for block in message.content if isinstance(block, dict) and block.get("type") in ("image", "image_url"))
+        estimate = base + estimate_input(messages, tools, request.model, chars_per_token)
         remaining = self.max_tokens - request.state.get("total_tokens", 0)
         available = remaining - estimate
         stop = self.guard and available < self.output_reserve

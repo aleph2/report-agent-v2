@@ -17,7 +17,7 @@ RUN_PROFILE = HarnessProfile(
 )
 
 
-def make_model(phase=None):
+def make_model(phase=None, *, offline=False):
     load_dotenv(Path.cwd() / ".env")
     name = os.environ.get("REVIEW_MODEL_NAME") if phase in ("verify-sources", "review", "clarify", "revise") else None
     name = name or os.environ["MODEL_NAME"]
@@ -27,8 +27,8 @@ def make_model(phase=None):
     if phase in PHASE_SETTINGS and name == os.getenv("THINKING_BUDGET_MODEL"):
         options["extra_body"] = {"thinking_budget": PHASE_SETTINGS[phase]["thinking_budget"]}
     return init_chat_model(
-        model=name, model_provider="openai", base_url=os.environ["OPENAI_BASE_URL"],
-        api_key=os.environ["OPENAI_API_KEY"], temperature=0.0, max_retries=0,
+        model=name, model_provider="openai", base_url="http://127.0.0.1" if offline else os.environ["OPENAI_BASE_URL"],
+        api_key="offline" if offline else os.environ["OPENAI_API_KEY"], temperature=0.0, max_retries=0,
         model_kwargs={"parallel_tool_calls": phase == "revise"},
         **options,
         # Close HTTP/1.1 sockets after each response, retaining framework settings.

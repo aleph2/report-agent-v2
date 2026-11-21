@@ -969,6 +969,37 @@ def test_invalid_revision_phase_options(tmp_path, monkeypatch, options):
     assert error.value.code == 2 and not (tmp_path / "work/runs").exists()
 
 
+def test_revision_preflight_matches_live_guard_without_running(tmp_path, monkeypatch, capsys):
+    # An empty response list would fail immediately if preflight reached the provider.
+    model = ScriptedModel(responses=[])
+    monkeypatch.setattr(cli, "make_model", lambda phase, **kwargs: model)
+    section = tmp_path / "work/sections/demo.md"
+    section.parent.mkdir(parents=True)
+    section.write_text("A source-grounded section.")
+    command = ["reportagent", "revise", str(tmp_path), "--section", "demo", "--phases", "review"]
+
+    def run(cap, *options):
+        monkeypatch.setattr(sys, "argv", [*command, "--max-tokens", str(cap), *options])
+        cli.main()
+        return capsys.readouterr().out
+
+    row = run(100000, "--preflight", "--phase-cap", "review=1")
+    assert "phase=review cap=1" in row and "affordable_requests=0" in row and "fewer than 2" in row
+    estimate = int(row.split("estimated_first_input=")[1].split()[0])
+    reserve = int(row.split("output_reserve=")[1].split()[0])
+    expected = int(row.split("expected_output=")[1].split()[0])
+    two = 2 * estimate + expected + reserve
+    assert "affordable_requests=1" in run(two - 1, "--preflight")
+    report = run(two, "--preflight")
+    assert "affordable_requests=2" in report and "fewer than 2" not in report
+    assert list(tmp_path.rglob("*.md")) == [section] and not (tmp_path / "work/runs").exists()
+
+    model.responses = [AIMessage(content="Done.", usage_metadata={"input_tokens": 2, "output_tokens": 1, "total_tokens": 3})]
+    run(two)
+    log, = (tmp_path / "work/runs").glob("*.requests.jsonl")
+    assert json.loads(log.read_text().splitlines()[0])["estimated_input_tokens"] == estimate
+
+
 @pytest.mark.parametrize("has_source_check", [True, False])
 def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch, has_source_check):
     flag = "clarification 43 line 8: F/grade 65.91/—; section states 56.49/III"
