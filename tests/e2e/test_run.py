@@ -40,7 +40,7 @@ def test_revision_phase_save_notice(tmp_path, phase, target, tool):
     costs = dict(input_tokens=30, output_tokens=0, total_tokens=30)
     model = ScriptedModel(responses=[call("read_file", file_path="/index.md").model_copy(update={"usage_metadata": costs}),
                                     allowed.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)})])
-    result = cli.build_agent(tmp_path, model, phase=phase,
+    result = cli.build_agent(tmp_path, model, phase=phase, section="demo",
                              middleware=[TokenCapMiddleware(100, phase=phase)]).invoke({"messages": [("user", "Save.")]})
     notice = next(m.content for m in result["messages"] if m.type == "human" and "Token budget reached" in m.content)
     assert phase in notice and tool in notice and "one write" not in notice
@@ -153,7 +153,8 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
         messages = [json.loads(line) for line in log.read_text().splitlines()]
         assert log.name.endswith(f"-{phase}.jsonl") and phase in messages[int(phase == "verify-sources")]["content"]
         if phase == "verify-sources": assert messages[0]["content"] == top
-        assert all(m["status"] == "success" for m in messages if m["type"] == "tool")
+        expected_status = ["success" if path.startswith("/sources/") else "error" for path in pages] + ["success"]
+        assert [m["status"] for m in messages if m["type"] == "tool"] == expected_status
         assert next(m for m in messages if m["type"] == "ai")["tool_calls"][0]["args"]["file_path"] == (pages[0] if pages else paths["clarify"])
     assert (tmp_path / paths["body"].lstrip("/")).read_text() == "Revised"
     assert all((tmp_path / paths[k].lstrip("/")).read_text() == "Checked" for k in ("sources", "review", "clarify"))
@@ -1124,51 +1125,70 @@ def test_arithmetic_thresholds_and_exact_tolerance(tmp_path, score, grade):
     assert "unavailable" in next(cli._score_arithmetic(source))
 
 
-def test_restricted_reads_only_source_and_keeps_native_write(tmp_path, monkeypatch):
-    monkeypatch.setitem(models.PHASE_SETTINGS["clarify"], "tool_policy", "restricted")
-    (tmp_path / "sources").mkdir()
-    (tmp_path / "sources/page-001.txt").write_text("Allowed source text")
-    (tmp_path / "notes.md").write_text("Outside sources")
+FIRST_COPY = "This file is already in your first message; use that copy."
+READ_SCOPE = "This phase may read /sources/ pages (find them in /index.md) and save its own file."
+
+
+def test_custom_first_message_does_not_claim_file_provenance(tmp_path):
+    (tmp_path / "notes.md").write_text("Unrelated text")
     model = ScriptedModel(responses=[call("read_file", file_path="/notes.md"),
-                                     call("read_file", file_path="/sources/page-001.txt"),
-                                     call("write_file", file_path="/out.md", content="Saved"),
-                                     AIMessage(content="done")])
-    result = cli.build_agent(tmp_path, model, phase="clarify").invoke({"messages": [("human", "Work.")]})
-    tools = [m for m in result["messages"] if m.type == "tool"]
-    assert tools[0].status == "error" and "Allowed source text" in tools[1].content
-    assert (tmp_path / "out.md").read_text().strip() == "Saved"
+                                     call("write_file", file_path="/out.md", content="Saved"), AIMessage(content="done")])
+    result = cli.build_agent(tmp_path, model, phase="clarify").invoke(
+        {"messages": [("human", "Case file: /notes.md\nUnrelated text")]})
+    reply, save = [m for m in result["messages"] if m.type == "tool"]
+    assert (reply.status, reply.content) == ("error", READ_SCOPE)
+    assert save.status == "success" and (tmp_path / "out.md").read_text() == "Saved"
 
 
-@pytest.mark.parametrize("phase,own,other", [
-    ("verify-sources", "demo-sources.md", "demo.md"), ("review", "demo.md", "demo-sources.md"),
+@pytest.mark.parametrize("phase,full_check", [
+    ("verify-sources", True), ("verify-sources", False), ("review", False), ("clarify", False), ("revise", False),
 ])
-def test_restricted_reviewer_reads_sources_and_writes_own_result(tmp_path, monkeypatch, phase, own, other):
-    monkeypatch.setitem(models.PHASE_SETTINGS[phase], "tool_policy", "restricted")
-    for name, content in [("sources/page-001.txt", "source evidence"), ("work/checks/demo.md", "checklist")]:
+def test_restricted_file_results_match_actual_inputs(tmp_path, monkeypatch, phase, full_check):
+    work = tmp_path / "work"
+    check = "work/checks/demo.md"
+    review = "work/reviews/demo.md"
+    sources = "work/reviews/demo-sources.md"
+    section = "work/sections/demo.md"
+    other = "work/clarifications/other.md"
+    paths = {"index.md": "Source page index", "near/index.md": "Lookalike", "sources/page-001.txt": "Page content",
+             check: "Checklist" + ("" if full_check else "\n## Findings\nDiagnostic omitted"), section: "Original",
+             review: "Review", sources: "Verified", "work/clarifications/demo.md": "number: 2\ncontent: Official",
+             other: "number: 2\ncontent: Excerpt\n---\nnumber: 4\ncontent: Extra"}
+    for name, content in paths.items():
         path = tmp_path / name
-        path.parent.mkdir(parents=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
-    reviews = tmp_path / "work/reviews"
-    reviews.mkdir()
-    blocked = [call("read_file", file_path="/work/checks/demo.md"),
-               call("read_file", file_path="/sources/../work/checks/demo.md"),
-               call("write_file", file_path=f"/work/reviews/{other}", content="forbidden"),
-               call("write_file", file_path="/work/reviews/another.md", content="forbidden")]
-    replies = [*blocked, call("read_file", file_path="/sources/page-001.txt"),
-               call("write_file", file_path=f"/work/reviews/{own}", content="saved"), AIMessage(content="done")]
+    supplied = {"verify-sources": check, "review": sources, "clarify": review, "revise": section}[phase]
+    read = lambda name: call("read_file", file_path="/" + name)
+    blocked = [read(supplied), read(other), read("near/index.md"), read("work/notes/demo.md"),
+               read("sources/../near/index.md"), read("sources/../" + supplied)]
+    expected = [("error", READ_SCOPE)] * len(blocked)
+    if phase != "verify-sources" or full_check:
+        expected[0] = ("error", FIRST_COPY)
+    if phase in ("verify-sources", "review"):
+        wrong = review if phase == "verify-sources" else sources
+        blocked += [call("write_file", file_path="/" + name, content="forbidden") for name in (wrong, "work/reviews/other.md")]
+        expected.extend([("error", READ_SCOPE)] * 2)
+    target = {"verify-sources": sources, "review": review, "clarify": "work/clarifications/demo.md", "revise": section}[phase]
+    save = (call("edit_file", file_path="/" + target, old_string="Original", new_string="Saved") if phase == "revise"
+            else call("write_file", file_path="/" + target, content="Saved"))
+    replies = [*blocked, read("index.md"), read("sources/page-001.txt"), save, AIMessage(content="done")]
     usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
     model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": usage}) for m in replies])
     monkeypatch.setattr(cli, "make_model", lambda _: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo",
-                                     "--phases", phase, "--max-tokens", "100000"])
+                                     "--phases", phase, "--phase-cap", f"{phase}=100000", "--max-tokens", "100000"])
     cli.main()
-    log, = phase_transcripts(tmp_path / "work/runs")
+    log, = phase_transcripts(work / "runs")
     messages = [json.loads(line) for line in log.read_text().splitlines()]
     tools = [m for m in messages if m["type"] == "tool"]
-    denial = "This file is already in your first message; use that copy. This phase may read /sources/ pages and save its own file."
-    assert [(m["status"], m["content"]) for m in tools[:len(blocked)]] == [("error", denial)] * len(blocked)
-    assert "source evidence" in tools[-2]["content"] and (reviews / own).read_text() == "saved"
-    assert list(reviews.iterdir()) == [reviews / own]
+    assert [(m["status"], m["content"]) for m in tools[:len(blocked)]] == expected
+    assert "Source page index" in tools[-3]["content"] and "Page content" in tools[-2]["content"]
+    assert (tmp_path / target).read_text() == "Saved" and not (work / "reviews/other.md").exists()
+    if phase == "clarify":
+        assert "content: Excerpt" in messages[0]["content"] and "content: Extra" not in messages[0]["content"]
+    if phase in ("verify-sources", "review"):
+        assert (tmp_path / wrong).read_text() == paths[wrong]
 
 
 @pytest.mark.parametrize("conditional_first", [False, True])

@@ -150,9 +150,14 @@ def _revision_messages(case, name, phase, prompt=None):
                       f"/work/clarifications/{name}.md. Save edits to /work/sections/{name}.md.",
         }[phase]
     if phase == "verify-sources":
-        top = (case / f"work/checks/{name}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]
-        return [_verification_input(case, name, top), HumanMessage(content=prompt)]
-    return [HumanMessage(content=_revision_input(case, name, phase, prompt))]
+        checklist = f"work/checks/{name}.md"
+        text = (case / checklist).read_text(encoding="utf-8")
+        top = text.partition("\n## Findings")[0]
+        message = _verification_input(case, name, top)
+        if top == text:
+            message.response_metadata["supplied_files"] = [checklist]
+        return [message, HumanMessage(content=prompt)]
+    return [_revision_input(case, name, phase, prompt)]
 
 
 def _revision_input(case, name, phase, prompt):
@@ -209,7 +214,9 @@ def _revision_input(case, name, phase, prompt):
                         end += 1
                 excerpt = "\n".join(lines[start:end])
             blocks.append(f"Duplicate clarification {number}: {location}\n{excerpt}")
-    return "\n\n".join(blocks)
+    # Excerpts and missing-file notices do not supply the whole file.
+    supplied = [p for p in paths if contents[p] is not None]
+    return HumanMessage(content="\n\n".join(blocks), response_metadata={"supplied_files": supplied})
 
 
 def _numbers(text):
@@ -513,7 +520,8 @@ def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=N
     try:
         model = make_model(phase)
         agent = build_agent(case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
-                            phase=phase if phase in REVISION_CAPS else None, section=section)
+                            phase=phase if phase in REVISION_CAPS else None, section=section,
+                            supplied_files=messages[0].response_metadata.get("supplied_files", ()))
         # Flush each checkpoint before advancing; avoids queued background writes.
         try:
             for state in agent.stream(state, config=config, stream_mode="values", durability="sync"):

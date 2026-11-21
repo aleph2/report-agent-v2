@@ -34,7 +34,7 @@ A response consisting of multiple edit_file calls is dispatched one native edit
 at a time in order. Each result is retained, including a failed match. After
 the batch, the original response and its tool results form the next model input
 and the saved transcript. Model usage is counted once per provider response.
-The default tool set is shared across phases. Optional phase settings are described below.
+The four revision phases use the tool settings described below.
 
 Each phase saves its full transcript in work/runs/. Standalone review runs only
 the review phase. plan/run, including --write-only, are for initial drafting;
@@ -64,15 +64,18 @@ image handling and unreported usage can affect accuracy.
 
 Phase tool settings
 
-In phase-settings.toml, clarify.tool_policy and revise.tool_policy default to
-"restricted". This exposes read_file for /sources/ plus write_file in
-clarify or edit_file in revise. Unknown or disallowed calls receive a tool error.
-"force-first" uses the full tool set and requests the phase's named write or edit
-on the first model request only. On Bailian this first request disables thinking
-and omits thinking_budget; later requests use their usual model settings.
-For verify-sources or review, setting tool_policy = "restricted" exposes read_file
-for /sources/ and write_file for this section's own work/reviews/NAME-sources.md
-or work/reviews/NAME.md, respectively. Both phases keep their full tools by default.
+All four revision phases default to tool_policy = "restricted" in phase-settings.toml.
+Each may read /index.md to map cited pages to /sources/ and use read_file under /sources/. Verify-sources and review use write_file
+only for their own work/reviews/NAME-sources.md and work/reviews/NAME.md files,
+respectively. Direct build_agent callers for these phases pass section=NAME.
+Clarify uses write_file and revise uses edit_file. Disallowed calls
+return a tool error. A denied read gets the first-message reminder only for a file
+delivered in full. Partial checklist text, claim excerpts and unavailable files get
+the general path guidance. Older frozen messages without a delivery record also
+use the general guidance. Omitting tool_policy restores the full tool set in that phase.
+For clarify and revise, "force-first" uses all tools and requests the phase's named
+write or edit on its first request. On Bailian that request disables thinking
+and omits thinking_budget. Later requests use their usual model settings.
 Provider documentation: https://help.aliyun.com/zh/model-studio/qwen-function-calling
 
 Offline score arithmetic
