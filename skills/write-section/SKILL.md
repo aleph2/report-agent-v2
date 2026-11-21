@@ -18,6 +18,7 @@ Where sources disagree, choose the value the commission's priority rule gives, s
 Apply that method exactly as those notes record it: its indicators, weight rule and grade thresholds.
 When a review is available, fix each must-fix finding supported by its evidence, citing that evidence. Keep unsupported corrections unresolved; do not invent a replacement fact.
 For revision, the first message supplies the review, numbered section, official clarifications and notes. Use these as case data and read files only for source pages.
+Submit your edits in your first response; read a source page only when a specific finding cannot be settled from the supplied inputs.
 Put all edits for this pass in one response, one edit_file call per affected paragraph or table row. Copy each old_string exactly from the text after the line-number tab. Each match must be unique and must not overlap another edit. Count an edit as saved only if its tool result confirms it.
 Write connected report prose, with （1）（2） numbering where a list is needed, keeping each fact's [file, page] citation.
 Use Markdown with one # heading; use ## and ### for subsections as needed.

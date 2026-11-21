@@ -19,6 +19,10 @@ from reportagent import cli, models
 from tests.fake_model import ScriptedModel, call
 
 
+def phase_transcripts(folder):
+    return (path for path in folder.glob("*.jsonl") if not path.name.endswith(".requests.jsonl"))
+
+
 @pytest.mark.parametrize("phase,target,tool", [
     ("verify-sources", "reviews/demo-sources", "write_file"),
     ("review", "reviews/demo", "write_file"),
@@ -47,8 +51,11 @@ def test_revision_phase_save_notice(tmp_path, phase, target, tool):
     assert sum(m.type == "ai" and bool(m.usage_metadata) for m in result["messages"]) == 2
 
 
-@pytest.mark.parametrize("cap,gather_costs,written", [(100, [1, 1, 1], 4), (6, [1, 1], 3), (4, [1, 1], 2), (3, [3], 0)])
-def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
+@pytest.mark.parametrize("cap,gather_costs,write_cost,written", [
+    (300_000, [20_000] * 3, 20_000, 4), (180_000, [30_000] * 2, 30_000, 3),
+    (120_000, [30_000] * 2, 30_000, 2), (90_000, [54_000], 30_000, 0),
+])
+def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, write_cost, written):
     (tmp_path / "sources").mkdir()
     (tmp_path / "commission").mkdir(exist_ok=True)
     (tmp_path / "commission/brief.md").write_text("Write the hydrology section.")
@@ -63,7 +70,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
                call("read_file", file_path="/work/sections/01-hydrology.md"), AIMessage(content="Done.")]
     gathered = sum(gather_costs)
     replies = [*gather[:len(gather_costs)], *replies]
-    costs = [*gather_costs, 1, 1, 1, 1]
+    costs = [*gather_costs, *([write_cost] * 4)]
     model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=cost, output_tokens=0, total_tokens=cost)}) for reply, cost in zip(replies, costs)])
     made, limits = [], []
     monkeypatch.setattr(cli, "make_model", lambda phase=None: made.append(True) or model)
@@ -83,7 +90,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     assert len(made) == (2 if written else 1) and limits == [int(cap * 0.6)] + ([max(0, cap - gathered)] if written else [])
     if len(gather_costs) > 1:
         assert (tmp_path / "work/notes/hydrology.md").read_text() == notes
-    logs = sorted((tmp_path / "work/runs").glob("*.jsonl"))
+    logs = sorted(phase_transcripts(tmp_path / "work/runs"))
     assert len(logs) == (2 if written else 1)
     research = [json.loads(line) for line in logs[0].read_text().splitlines()]
     draft = [json.loads(line) for line in logs[1].read_text().splitlines()] if written else []
@@ -92,10 +99,14 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
     assert research[0]["content"] == "Gather evidence for the section requested in /commission/."
     if written:
         assert draft[0]["content"] == "Write the section from the notes in /work/notes/."
-        assert [m["content"] for m in draft if m["type"] == "human"] == [draft[0]["content"]] + (["Token budget reached. Save your work now in one write; do not read anything more."] if written < 4 else [])
-    assert [sum((m.get("usage_metadata") or {}).get("total_tokens", 0) for m in log) for log in (research, draft)] == [gathered, written]
+        notices = [m["content"] for m in draft[1:] if m["type"] == "human"]
+        remaining = cap - gathered - (written - 1) * write_cost
+        save_notice = ("Token budget reached. Save your work now in one write; do not read anything more. "
+                       f"Remaining allowance: {remaining} tokens.")
+        assert notices == ([save_notice] if written < 4 else [])
+    assert [sum((m.get("usage_metadata") or {}).get("total_tokens", 0) for m in log) for log in (research, draft)] == [gathered, written * write_cost]
     output = capsys.readouterr().out
-    assert f"Reported tokens: {gathered + written}" in output
+    assert f"Reported tokens: {gathered + written * write_cost}" in output
     if written:
         assert draft[1]["tool_calls"][0]["args"]["file_path"] == "/work/notes/hydrology.md" and notes in draft[2]["content"]
         assert (tmp_path / "work/sections/01-hydrology.md").read_text() == section
@@ -109,7 +120,7 @@ def test_cli_run(tmp_path, monkeypatch, capsys, cap, gather_costs, written):
         assert not (tmp_path / "work/sections").exists()
 
 
-@pytest.mark.parametrize("budget", [100, 300000, 600000])
+@pytest.mark.parametrize("budget", [60_000, 300_000, 600_000])
 def test_cli_revision(tmp_path, monkeypatch, budget):
     paths = {"check": "/work/checks/demo.md", "sources": "/work/reviews/demo-sources.md",
              "review": "/work/reviews/demo.md", "body": "/work/sections/demo.md",
@@ -135,7 +146,7 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
     for maximum, pages in zip((80000, 100000, 40000, 80000), reads):
         expected.append(min(maximum, budget - used)); used += len(pages) + 2
     assert limits == expected and sum(limits) <= 300000
-    logs = sorted((tmp_path / "work/runs").glob("*.jsonl"))
+    logs = sorted(phase_transcripts(tmp_path / "work/runs"))
     assert sum(json.loads(line)["type"] == "ai" for log in logs for line in log.read_text().splitlines()) == len(replies)
     for log, phase, pages in zip(logs, ("verify-sources", "review", "clarify", "revise"), reads):
         messages = [json.loads(line) for line in log.read_text().splitlines()]
@@ -166,7 +177,7 @@ def test_verification_opens_with_cited_page(tmp_path, monkeypatch):
     top = cli.check(tmp_path, "demo").read_text().partition("\n## Findings")[0]
     model = ScriptedModel(responses=[AIMessage(content="Done.")])
     monkeypatch.setattr(cli, "make_model", lambda phase: model)
-    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", "100"])
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo", "--max-tokens", "100000"])
     with patch.object(ScriptedModel, "_generate", autospec=True, side_effect=ScriptedModel._generate) as generated:
         cli.main()
     first = generated.call_args_list[0].args[1]
@@ -275,7 +286,7 @@ def test_cli_write_only(tmp_path, monkeypatch, capsys, failure):
     section = f"# Hydrology\n\n{notes}"
     replies = [call("read_file", file_path="/work/notes/hydrology.md"),
                call("write_file", file_path="/work/sections/01-hydrology.md", content=section), AIMessage(content="Done.")]
-    model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": dict(input_tokens=1, output_tokens=0, total_tokens=1)}) for m in replies])
+    model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": dict(input_tokens=30000, output_tokens=0, total_tokens=30000)}) for m in replies])
     attempts, original = [], ScriptedModel._generate
     def generate(self, messages, **kwargs):
         attempts.append([(m.type, m.content) for m in messages])
@@ -284,19 +295,19 @@ def test_cli_write_only(tmp_path, monkeypatch, capsys, failure):
         return original(self, messages, **kwargs)
     monkeypatch.setattr(ScriptedModel, "_generate", generate)
     monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
-    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "3", "--write-only"])
+    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "90000", "--write-only"])
     if failure == "twice":
         with pytest.raises(RemoteProtocolError):
             cli.main()
     else:
         cli.main()
-    logs = list((tmp_path / "work/runs").glob("*.jsonl"))
+    logs = list(phase_transcripts(tmp_path / "work/runs"))
     assert len(logs) == 1 and logs[0].name.endswith("-write.jsonl")
     transcript = [json.loads(line) for line in logs[0].read_text().splitlines()]
     events = [m for m in transcript if m["type"] == "resume"]
     assert len(attempts) == (2 if failure == "none" else 3) and len(events) == int(failure != "none")
-    assert failure == "none" or (attempts[1] == attempts[2] and events[0]["total_tokens"] == 1)
-    assert f"Reported tokens: {1 if failure == 'twice' else 2}" in capsys.readouterr().out
+    assert failure == "none" or (attempts[1] == attempts[2] and events[0]["total_tokens"] == 30000)
+    assert f"Reported tokens: {30000 if failure == 'twice' else 60000}" in capsys.readouterr().out
     if failure == "twice":
         assert transcript[-1]["type"] == "resume" and not (tmp_path / "work/sections").exists()
         return
@@ -334,7 +345,7 @@ def test_failed_run_keeps_conversation(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "100"])
     with pytest.raises(FileNotFoundError):
         cli.main()
-    transcript = [json.loads(line) for line in next((tmp_path / "work/runs").glob("*.jsonl")).read_text().splitlines()]
+    transcript = [json.loads(line) for line in next(phase_transcripts(tmp_path / "work/runs")).read_text().splitlines()]
     assert transcript[0]["type"] == "human" and transcript[-1]["content"] == "Before failure."
 
 
@@ -343,9 +354,9 @@ def test_cli_call_limit_and_missing_usage(tmp_path, monkeypatch):
     (tmp_path / "commission/brief.md").write_text("Read the commission.")
     model = ScriptedModel(responses=[call("read_file", file_path="/commission/brief.md") for _ in range(401)])
     monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
-    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "100000"])
+    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--max-tokens", "300000"])
     cli.main()
-    logs = list((tmp_path / "work/runs").glob("*.jsonl"))
+    logs = list(phase_transcripts(tmp_path / "work/runs"))
     assert model.i == 200 and len(logs) == 1
     for log in logs:
         transcript = [json.loads(line) for line in log.read_text().splitlines()]
@@ -376,10 +387,16 @@ def test_plan_then_named_section(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     for command in ("plan", "run", "review"):
         section_args = ["--section", section] if command != "plan" else []
-        monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "10", *section_args])
+        monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "100000", *section_args])
         cli.main()
     assert {path: (tmp_path / path.lstrip("/")).read_text() for path in outputs} == outputs
-    logs = {p.stem.rsplit("-", 1)[1]: [json.loads(line) for line in p.read_text().splitlines()] for p in (tmp_path / "work/runs").glob("*.jsonl")}
+    logs = {p.stem.rsplit("-", 1)[1]: [json.loads(line) for line in p.read_text().splitlines()] for p in phase_transcripts(tmp_path / "work/runs")}
+    sidecars = list((tmp_path / "work/runs").glob("*.requests.jsonl"))
+    assert {p.name.split("-")[-1].split(".")[0] for p in sidecars} == {"plan", "gather", "write", "review"}
+    for path in sidecars:
+        first = json.loads(path.read_text().splitlines()[0])
+        assert first["decision"] == "send"
+        assert first["max_output_tokens"] == first["remaining_tokens"] - first["estimated_input_tokens"]
     assert set(logs) == {"plan", "gather", "write", "review"} and logs["plan"][0]["content"] == "Plan the report requested in /commission/."
     assert logs["review"][0]["content"] == f"Review section {section}. Save the review to /work/reviews/{section}.md."
     for phase, folder in (("gather", "notes"), ("write", "sections")):
@@ -440,14 +457,14 @@ def test_plan_and_review_receive_half_budget_note(tmp_path, monkeypatch, command
     plan = "## 01-synthetic\nSynthetic guidance."
     target = "/work/plan.md" if command == "plan" else "/work/reviews/01-synthetic.md"
     replies = [call("read_file", file_path="/commission/brief.md"), call("read_file", file_path="/commission/brief.md"), call("write_file", file_path=target, content=plan), AIMessage(content="Saved.")]
-    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n)}) for reply, n in zip(replies, [2, 2, 1, 1])])
+    model = ScriptedModel(responses=[reply.model_copy(update={"usage_metadata": dict(input_tokens=n, output_tokens=0, total_tokens=n)}) for reply, n in zip(replies, [20000, 20000, 10000, 10000])])
     monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
     section_args = ["--section", "01-synthetic"] if command == "review" else []
-    monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "10", *section_args])
+    monkeypatch.setattr(sys, "argv", ["reportagent", command, str(tmp_path), "--max-tokens", "100000", *section_args])
     cli.main()
-    messages = [json.loads(line) for line in next((tmp_path / "work/runs").glob("*.jsonl")).read_text().splitlines()]
+    messages = [json.loads(line) for line in next(phase_transcripts(tmp_path / "work/runs")).read_text().splitlines()]
     notes = [m for m in messages if m["type"] == "human" and m["content"].startswith("You have used")]
-    assert len(notes) == 1 and notes[0]["content"].startswith("You have used 5 of 10 tokens.")
+    assert len(notes) == 1 and notes[0]["content"].startswith("You have used 50000 of 100000 tokens.")
     assert messages[messages.index(notes[0]) - 1]["type"] == "tool" and (tmp_path / target.lstrip("/")).read_text() == plan
 
 
@@ -457,10 +474,10 @@ def test_named_run_requires_notes_file(tmp_path, monkeypatch, capsys, matching):
     (notes / ("02-synthetic.md" if matching else "01-other.md")).touch()
     model = ScriptedModel(responses=[AIMessage(content="Done.") for _ in range(3)])
     monkeypatch.setattr(cli, "make_model", lambda phase=None: model)
-    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--section", "02-synthetic", "--max-tokens", "100"])
+    monkeypatch.setattr(sys, "argv", ["reportagent", "run", str(tmp_path), "--section", "02-synthetic", "--max-tokens", "100000"])
     cli.main()
     assert model.i == (2 if matching else 1)
-    assert len(list((tmp_path / "work/runs").glob("*.jsonl"))) == (2 if matching else 1)
+    assert len(list(phase_transcripts(tmp_path / "work/runs"))) == (2 if matching else 1)
     assert ("No notes for 02-synthetic; writing skipped." in capsys.readouterr().out) is (not matching)
 
 
@@ -882,7 +899,7 @@ def test_clarification_collisions_check_export_and_resolution(tmp_path):
 
 
 @pytest.mark.parametrize("answer_id,expected,total,clarify,revise", [
-    (90, 96, 100, 60, 220), (101, 102, 300000, 60000, 220000),
+    (90, 96, 100000, 60000, 220000), (101, 102, 300000, 60000, 220000),
 ])
 def test_selected_revision_phases_and_cap(tmp_path, monkeypatch, answer_id, expected, total, clarify, revise):
     work = tmp_path / "work"
@@ -907,7 +924,7 @@ def test_selected_revision_phases_and_cap(tmp_path, monkeypatch, answer_id, expe
                         "--phase-cap", f"clarify={clarify}", "--phase-cap", f"revise={revise}"])
     cli.main()
     assert limits == [("clarify", clarify), ("revise", min(total - 7, revise))]
-    logs = sorted((work / "runs").glob("*.jsonl"))
+    logs = sorted(phase_transcripts(work / "runs"))
     assert len(logs) == 2
     first = json.loads(logs[0].read_text().splitlines()[0])
     assert first["type"] == "human" and f"Next free clarification number: {expected}" in first["content"]
@@ -915,6 +932,7 @@ def test_selected_revision_phases_and_cap(tmp_path, monkeypatch, answer_id, expe
 
 
 @pytest.mark.parametrize("options", [
+    ["--budget-info"], ["--budget-guard"], ["--no-budget-guard"],
     ["--phases", "unknown"], ["--phases", "revise,revise"], ["--phases", ""],
     ["--phase-cap", "revise"], ["--phase-cap", "unknown=20"], ["--phase-cap", "revise=0"],
     ["--phase-cap", "review=20", "--phase-cap", "review=30"], ["--phases", "revise", "--phase-cap", "clarify=10"],
@@ -942,10 +960,10 @@ def test_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
         "input_tokens": 1, "output_tokens": 0, "total_tokens": 1})])
     monkeypatch.setattr(cli, "make_model", lambda phase: model)
     monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo",
-                                     "--max-tokens", "100", "--phases", "clarify,revise"])
+                                     "--max-tokens", "100000", "--phases", "clarify,revise"])
     cli.main()
     clarify, revise = [json.loads(f.read_text().splitlines()[0])["content"]
-                       for f in sorted((tmp_path / "work/runs").glob("*.jsonl"))]
+                       for f in sorted(phase_transcripts(tmp_path / "work/runs"))]
     for rel in ("work/reviews/demo.md", "work/sections/demo.md", "work/clarifications/demo.md",
                 "work/clarifications/demo.pending.md", "commission/澄清答复.md"):
         assert rel in clarify and paths[rel] in clarify

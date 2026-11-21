@@ -146,7 +146,7 @@ def test_cli_guard_stops_oversized_first_input(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ScriptedModel, "_generate", lambda *args, **kwargs: pytest.fail("Guard sent oversized input"))
     monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "left",
                                      "--phases", "revise", "--phase-cap", "revise=40000",
-                                     "--max-tokens", "20000", "--budget-guard"])
+                                     "--max-tokens", "20000"])
     cli.main()
     sidecar, = (tmp_path / "work/runs").glob("*-revise.requests.jsonl")
     entry = json.loads(sidecar.read_text())

@@ -40,18 +40,14 @@ the review phase. plan/run, including --write-only, are for initial drafting;
 use revise for the four-phase revision workflow. No file-content judgement or
 quality gate is added: the agents still decide what evidence and prose mean.
 
-Offline budget proposals for owner review (both switches default off):
-  --budget-info   Log each estimated input before sending, set max_completion_tokens
-                  to the remaining effective allowance, and state the remainder in
-                  the final-save message. A large input can still exceed the allowance.
-  --budget-guard  End the phase before sending if estimated input plus 8,000 exceeds
-                  the remaining effective allowance. On admission the maximum output
-                  is the allowance less estimated input. A guard stop logs zero new
-                  provider usage. Combine the switches to also show the final-save balance.
-Both switches apply to plan, run, review and revise. Their request records are appended
-before transport to work/runs/<timestamp>-<phase>.requests.jsonl. Entries contain
-the estimate, remaining tokens, maximum output and send/stop decision. The estimates
-include the assembled system and chat messages and tool schemas. LangChain counts
-1.5 characters per token and estimates 16,384 tokens per image here. These are local
-approximations. Provider tokenization, image handling, missing usage or an unanswered
-request can make the reported total differ. Neither option guarantees a hard ceiling.
+Every model-taking command (plan, run, review and revise) checks the remaining
+phase and total allowance before each request. If estimated input plus the 8,000
+token output reserve exceeds the effective allowance, the phase ends locally.
+An admitted request limits max_completion_tokens to the allowance less estimated
+input. A final-save request uses the same check and states the remaining balance.
+The guard and request log are always enabled. Each decision is appended before
+transport to work/runs/<timestamp>-<phase>.requests.jsonl, with estimated input,
+remaining tokens, maximum output and send/stop decision. The estimate includes
+the assembled system and chat messages, tool schemas and images. LangChain uses
+1.5 characters per token and 16,384 tokens per image here. Provider tokenization,
+image handling and unreported usage can affect accuracy.
