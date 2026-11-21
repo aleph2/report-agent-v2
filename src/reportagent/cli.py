@@ -17,11 +17,12 @@ from httpx import NetworkError, RemoteProtocolError, TimeoutException
 from langgraph.checkpoint.memory import InMemorySaver
 from openai import APIConnectionError
 
-from langchain.agents.middleware import ModelCallLimitMiddleware
-from langchain_core.messages import HumanMessage
+from langchain.agents.middleware import ModelCallLimitMiddleware, wrap_model_call
+from langchain_core.messages import AIMessage, HumanMessage
+from langsmith import tracing_context
 
 from .agent import PHASE_SKILLS, build_agent
-from .budget import TokenCapMiddleware
+from .budget import TokenCapMiddleware, estimate_input
 from .export.docx import clarification_numbers, export_docx
 from .ingest import ingest
 from .models import PHASE_SETTINGS, make_model
@@ -547,6 +548,29 @@ def check(case, name):
     return output
 
 
+def _preflight(case, section, phase, messages, cap):
+    settings = PHASE_SETTINGS[phase]
+    reserve, expected = settings["output_reserve"], settings["thinking_budget"]
+
+    @wrap_model_call
+    def inspect_request(request, handler):
+        prompt = ([request.system_message] if request.system_message else []) + request.messages
+        first = estimate_input(prompt, request.tools, request.model)
+        # k inputs, k-1 estimated completed outputs, one reserve for the final send.
+        affordable = max(0, (cap - reserve + expected) // (first + expected))
+        conservative = max(0, cap // (first + reserve))
+        print(f"phase={phase} cap={cap} estimated_first_input={first} output_reserve={reserve} "
+              f"expected_output={expected} affordable_requests={affordable} conservative_requests={conservative}")
+        if conservative < 2:
+            print(f"{phase}: conservative estimate affords fewer than 2 requests.")
+        return AIMessage(content="Preflight complete.")
+
+    with tracing_context(enabled=False):
+        agent = build_agent(case, make_model(phase, offline=True), middleware=[inspect_request], phase=phase,
+                            section=section, supplied_files=messages[0].response_metadata.get("supplied_files", ()))
+        agent.invoke({"messages": messages})
+
+
 def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=None):
     state = {"messages": messages}
     calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
@@ -758,6 +782,7 @@ def main():
             command.add_argument("--score-arithmetic", action="store_true", help="only print score discrepancies; omit --section for all sections")
         if name == "revise":
             command.add_argument("--phases", metavar="LIST", help="Comma-separated phases in the revision workflow")
+            command.add_argument("--preflight", action="store_true", help="estimate affordable requests without calling the model")
             command.add_argument("--phase-cap", action="append", default=[], metavar="NAME=N",
                                  help="Override one selected phase's token cap (repeatable)")
         if name == "run":
@@ -806,7 +831,14 @@ def main():
     remaining = args.max_tokens
     total = 0
     folder = args.case / "work/runs"
-    folder.mkdir(parents=True, exist_ok=True)
+    preflight = args.command == "revise" and args.preflight
+    if preflight:
+        print(f"Shared run cap={remaining}. Each phase uses current files and the available cap before other phases spend. "
+              "Assume first input repeats and use the phase thinking budget as a proxy for each prior output. "
+              "The conservative count uses output_reserve for each prior output. "
+              "Estimate k with k * input + (k - 1) * expected_output + output_reserve <= cap.")
+    else:
+        folder.mkdir(parents=True, exist_ok=True)
     if args.command == "plan":
         phases = (("plan", "Plan the report requested in /commission/."),)
     elif args.command == "revise":
@@ -845,6 +877,9 @@ def main():
             limit = min(limit, phase_caps[phase])
         messages = (_revision_messages(args.case, args.section, phase, prompt) if phase in REVISION_CAPS
                     else [HumanMessage(content=prompt)])
+        if preflight:
+            _preflight(args.case, args.section, phase, messages, limit)
+            continue
         _, used = _run_phase(args.case, phase, messages, limit, folder, total, getattr(args, "section", None))
         total += used
         remaining = max(0, remaining - used)
