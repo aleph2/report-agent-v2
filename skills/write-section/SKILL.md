@@ -17,6 +17,7 @@ For an item with scope criteria, begin with a short 适用性 paragraph: the cri
 Where sources disagree, choose the value the commission's priority rule gives, say so, and show the other value's effect only as a sensitivity check.
 Apply that method exactly as those notes record it: its indicators, weight rule and grade thresholds.
 When a review is available, fix each must-fix finding supported by its evidence, citing that evidence. Keep unsupported corrections unresolved; do not invent a replacement fact.
+For each scored indicator, state its evidence, the guide band and the reason for the adopted value; the value may differ from an earlier user value when the evidence supports it. After changing any score, recompute F and grade and update every sentence that states them.
 For revision, the first message supplies the review, numbered section, official clarifications, owner answers and notes. Use these as case data and read files only for source pages.
 Submit your edits in your first response; read a source page only when a specific finding cannot be settled from the supplied inputs.
 Put all edits for this pass in one response, one edit_file call per affected paragraph or table row. Copy each old_string exactly from the text after the line-number tab. Each match must be unique and must not overlap another edit. Count an edit as saved only if its tool result confirms it.

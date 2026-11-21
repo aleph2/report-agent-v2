@@ -15,6 +15,7 @@ Check these in order:
 4. The 适用性 paragraph against the scope criteria.
 5. Absence claims against the opened pages.
 6. Internal consistency: cross-references, units and slope ratios.
+Judge an adopted score by its cited evidence, band and reason; a difference from an earlier user value is not by itself a finding. Report any place where the stated F or grade differs from the scoring table.
 For coverage and structure only, you may read the matching part of /reference/ to see what a complete section of this kind contains. Do not take any value from it or quote reference facts in the review.
 Write each finding as one line: label (content / method / process), location, what is wrong, evidence [file, page], and must-fix or note.
 End with a short list titled "可推广经验": general one-line lessons with no case facts.

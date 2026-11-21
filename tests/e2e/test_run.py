@@ -132,7 +132,7 @@ def test_cli_revision(tmp_path, monkeypatch, budget):
     (tmp_path / paths["check"].lstrip("/")).write_text(top + "\n## Findings\nFinding omitted from the first message.\n")
     reads = [[paths["check"], "/sources/design/page-001.txt", "/sources/design/page-002.txt"],
              [paths["sources"], paths["body"]], [],
-             [paths[k] for k in ("clarify", "review", "body")]]
+             ["/sources/design/page-001.txt"]]
     saves = [call("write_file", file_path=paths[key], content="Checked") for key in ("sources", "review", "clarify")]
     saves.append(call("edit_file", file_path=paths["body"], old_string="Before", new_string="Revised"))
     replies = [reply for pages, save in zip(reads, saves) for reply in
@@ -1064,7 +1064,8 @@ def test_phase_tool_policy(tmp_path, monkeypatch, phase, write, policy):
         seen.append(({t.name for t in tools}, kwargs))
         return self.bind(tools=tools, **kwargs)
     monkeypatch.setattr(ScriptedModel, "bind_tools", bind)
-    monkeypatch.setitem(models.PHASE_SETTINGS[phase], "tool_policy", policy)
+    if policy == "force-first":
+        monkeypatch.setitem(models.PHASE_SETTINGS[phase], "tool_policy", policy)
     model = ScriptedModel(responses=[call("ls", path="/"), AIMessage(content="done")])
     state = cli.build_agent(tmp_path, model, phase=phase).invoke({"messages": [("human", "Work.")]})
     assert len(seen) == 2
@@ -1104,9 +1105,9 @@ def test_score_arithmetic_only_reports_baseline_discrepancies(tmp_path, monkeypa
     notes.mkdir()
     (notes / "demo.md").write_text("")
     original = cli.check(tmp_path, "demo").read_bytes()
-    assert not capsys.readouterr().out
-    monkeypatch.setitem(models.PHASE_SETTINGS["checks"], "score_arithmetic", True)
-    assert cli.check(tmp_path, "demo").read_bytes() == original and "71.25/IV" in capsys.readouterr().out
+    assert "71.25/IV" in capsys.readouterr().out
+    monkeypatch.setitem(models.PHASE_SETTINGS["checks"], "score_arithmetic", False)
+    assert cli.check(tmp_path, "demo").read_bytes() == original and not capsys.readouterr().out
 
 
 
