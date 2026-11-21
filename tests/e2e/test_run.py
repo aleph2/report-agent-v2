@@ -1135,7 +1135,7 @@ def test_phase_tool_policy(tmp_path, monkeypatch, phase, write, policy):
     state = cli.build_agent(tmp_path, model, phase=phase).invoke({"messages": [("human", "Work.")]})
     assert len(seen) == 2
     if policy == "restricted":
-        assert all(names == {"read_file", write} for names, _ in seen)
+        assert all(names == {"read_file", write, "calculate_score"} for names, _ in seen)
         assert any(m.type == "tool" and m.status == "error" for m in state["messages"])
     else:
         assert "ls" in seen[0][0] and "ls" in seen[1][0]

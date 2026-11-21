@@ -23,3 +23,8 @@ score_arithmetic = true
 
 [image_tokens]
 qwen4-max = 32
+
+[grading]
+# Guide table 3-3. Upper bounds are inclusive; the last grade has no upper bound.
+upper_bounds = [30, 45, 60]
+grades = ["I", "II", "III", "IV"]

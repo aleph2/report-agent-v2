@@ -7,7 +7,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from pathlib import Path
 from shutil import copytree
 from tempfile import TemporaryDirectory, mkdtemp
@@ -22,7 +22,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langsmith import tracing_context
 
 from . import learn
-from .agent import PHASE_SKILLS, build_agent
+from .agent import PHASE_SKILLS, build_agent, score_result
 from .budget import TokenCapMiddleware, estimate_input
 from .export.docx import clarification_numbers, export_docx
 from .ingest import ingest
@@ -362,9 +362,8 @@ def _score_arithmetic(path):
         if start is not None:
             yield f"{path.stem} line {start + 1}: score arithmetic unavailable; no indicator rows"
         return
-    # Table 3-3 grades use strict lower bounds. Decimal half-up displays the reported precision.
-    grade = "IV" if total > 60 else "III" if total > 45 else "II" if total > 30 else "I"
-    display = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    result = score_result(total)
+    grade, display = result["grade"], result["F"]
     baseline = True
     compared = False
     continuation = False

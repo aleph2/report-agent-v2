@@ -11,3 +11,5 @@ Write each source as its full filename and page (or item for an unpaged answer f
 Also fill object: (the client's item name), question: (one direct question), required: (the settling document or value), effect: (quantified score/grade impact, or descriptive only), and rank: 1 for an indicator without direct evidence or a grade change, 2 for other score-only items, 3 for description.
 
 Save the complete file at the official clarification path in the assignment, retaining every existing item and its number except an evidenced collision renumbering. Incorporate supported pending items here.
+
+In the clarify phase, use calculate_score for every F, range endpoint and scenario figure written in the text.

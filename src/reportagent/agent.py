@@ -1,18 +1,54 @@
+from decimal import Decimal, ROUND_HALF_UP
 from importlib.resources import files
 from pathlib import Path
 from shutil import copytree
-from typing import NotRequired
+from typing import Annotated, NotRequired
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
 from langchain_core.messages import AIMessage, ToolMessage
 
+from langchain_core.tools import tool
+from pydantic import Field
+
 from .models import PHASE_SETTINGS
+
+
+Score = Annotated[Decimal, Field(ge=0, le=100)]
+Weight = Annotated[Decimal, Field(ge=0, le=1)]
+SCORE_PHASES = ("review", "revise", "clarify")
+
+
+def score_result(total):
+    grading = PHASE_SETTINGS["grading"]
+    grade_index = sum(total > limit for limit in grading["upper_bounds"])
+    return {"F": str(total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "grade": grading["grades"][grade_index]}
+
+
+@tool
+def calculate_score(scores: dict[str, Score], weights: dict[str, Weight],
+                    scenarios: list[dict[str, Score]] | None = None) -> dict:
+    """Compute base F = sum(score * weight) and grade. Use identical indicator IDs and fractional weights; weights are used as supplied.
+    Each scenario overrides only named base scores; results follow input order. Grade uses unrounded F.
+    To calculate a range, supply its lower and upper endpoint scenarios.
+    """
+    if not scores or scores.keys() != weights.keys():
+        return {"error": "Supply the same nonempty set of indicator IDs for scores and weights."}
+    scenarios = scenarios or []
+    if any(overrides.keys() - scores.keys() for overrides in scenarios):
+        return {"error": "A scenario may override only indicators in the base scores."}
+
+    def evaluate(values):
+        return score_result(sum(values[key] * weight for key, weight in weights.items()))
+
+    return {"base": evaluate(scores), "scenarios": [evaluate(scores | overrides) for overrides in scenarios]}
 
 
 class PhaseTools(AgentMiddleware):
     def __init__(self, phase, policy, case, section, supplied_files):
+        self.score_tool = ("calculate_score",) if phase in SCORE_PHASES else ()
         self.action = "edit_file" if phase == "revise" else "write_file"
         self.policy = policy
         self.case = case.resolve()
@@ -25,7 +61,7 @@ class PhaseTools(AgentMiddleware):
 
     def _model_request(self, request):
         if self.policy == "restricted":
-            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in ("read_file", self.action)])
+            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in ("read_file", self.action, *self.score_tool)])
         if any(isinstance(m, AIMessage) for m in request.messages):
             return request
         # Bailian accepts a named choice only with thinking disabled on this request.
@@ -42,6 +78,8 @@ class PhaseTools(AgentMiddleware):
 
     def _denied(self, call):
         if self.policy != "restricted":
+            return None
+        if call["name"] in self.score_tool:
             return None
         relative = call["args"].get("file_path", "").lstrip("/")
         path = (self.case / relative).resolve()
@@ -112,7 +150,7 @@ def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None
     if policy == "restricted" or (phase in ("clarify", "revise") and policy == "force-first"):
         middleware = [PhaseTools(phase, policy, case_dir, section, supplied_files), *middleware]
     return create_deep_agent(
-        model=model,
+        model=model, tools=[calculate_score] if phase in SCORE_PHASES else [],
         middleware=[RevisionEdits(), *middleware] if phase == "revise" else middleware,
         checkpointer=checkpointer,
         backend=backend, skills=skills,
