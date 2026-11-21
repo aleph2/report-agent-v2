@@ -4,22 +4,21 @@ Each accepted section has a private pack at `<case>/work/replay/<section>/`. It 
 
 ## Run
 
-After obtaining a grant for a live batch, run from the repository root:
+Select the exact section and one authorized batch. Each phase uses its own frozen pre-phase files. A review starts with its frozen source check even if verification in the same batch saved nothing.
 
 ```sh
-.venv/bin/python -m reportagent replay cases/g4-contract1 --skill verify-sources
+.venv/bin/python -m reportagent replay cases/g4-contract1 --section "$section" --batch verify-review
+.venv/bin/python -m reportagent replay cases/g4-contract1 --section "$section" --batch clarify-revise
 ```
 
-| Skill | Replayed phase | Phase cap |
-|---|---|---:|
-| verify-sources | verify-sources | 60,000 |
-| review-section | review | 60,000 |
-| clarify-section | clarify | 60,000 |
-| write-section | revise | 80,000 |
+| Batch | First phase | Second phase | Maximum batch allocation |
+|---|---|---|---:|
+| verify-review | verify-sources (90,000) | review (100,000) | 190,000 |
+| clarify-revise | clarify (100,000) | revise (130,000) | 230,000 |
 
-By default, the production revision command and replay build the same leading messages from the supplied case files. Replay reads its isolated, frozen pre-phase copy. Add `--historical-input` to use the exact recorded leading messages. Each result records `input_mode` (current or historical) and `phase_cap`. The four phase caps total 260,000 tokens per section.
+These limits match the explicit phase caps used in production runs. Each phase is also limited by the remaining batch allocation. For a single phase, use `--skill` with one of `verify-sources`, `review-section`, `clarify-section` or `write-section`. Supply `--section` for a batch or when the case contains several packs.
 
-The command selects the corresponding phase for each frozen section, verifies the input hashes, then invokes the normal agent with the current model settings, the phase cap above, the pre-request guard and the normal call limit. Each phase starts in a separate copy. The command prints the result and saves `results.json`, transcripts and request sidecars in a new `reportagent-replay-*` directory beside the real case. Only the temporary case copy is discarded. A `blocked_before_send` result means the configured input estimate and output reserve did not fit the cap.
+By default the production and replay commands build the leading messages from their respective case files. Add `--historical-input` to replay the recorded leading messages. The CLI verifies every selected fixture before invoking the model. It preserves `results.json`, transcripts and request sidecars in a new `reportagent-replay-*` directory beside the real case. Each result records `input_mode` and `phase_cap`. A `blocked_before_send` result means that the estimated input and output reserve did not fit.
 
 ## Measured outcomes
 

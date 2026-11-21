@@ -60,7 +60,7 @@ def test_skill_replay_runs_in_isolation_on_frozen_inputs(tmp_path, monkeypatch, 
     assert result["input_mode"] == ("historical" if historical else "current")
     assert m["must_fix_touched"]["label"] == "edits touching finding lines"
     req, = (run / "demo").glob("*.requests.jsonl")
-    assert json.loads(req.read_text().splitlines()[0])["remaining_tokens"] == result["phase_cap"] == 80000
+    assert json.loads(req.read_text().splitlines()[0])["remaining_tokens"] == result["phase_cap"] == 130000
     assert {p.name for p in (case / "work").iterdir()} == {"replay"}
 
 
@@ -105,8 +105,43 @@ def test_freeze_and_replay_counts_only_ids_saved_by_this_run(tmp_path, monkeypat
     log, = (run / "demo").glob("*-verify-sources.jsonl")
     rebuilt = [json.loads(line)["content"] for line in log.read_text().splitlines()[:2]]
     assert rebuilt[0] == "Current frozen checklist" and "Save the source checks" in rebuilt[1]
-    assert result["phase_cap"] == 60000
+    assert result["phase_cap"] == 90000
     assert result["missing_ids"] == [1, 2] and result["execution_status"] == "completed"
     (fixture / "inputs.jsonl").write_text(HumanMessage(content="altered").model_dump_json())
     with pytest.raises(SystemExit, match="changed"):
         cli.main()
+
+
+@pytest.mark.parametrize("batch,limits", [
+    ("verify-review", [("verify-sources", 90000), ("review", 100000)]),
+    ("clarify-revise", [("clarify", 100000), ("revise", 130000)]),
+])
+def test_replay_batch_selects_one_section(tmp_path, monkeypatch, batch, limits):
+    case, state = tmp_path / "case", tmp_path / "state"
+    pack = case / "work/replay/demo"
+    (pack.parent / "other").mkdir(parents=True)
+    for folder in ("sections", "checks"):
+        path = state / "work" / folder / "demo.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("Demo")
+    trace, criteria = tmp_path / "trace.jsonl", tmp_path / "criteria.json"
+    reply = AIMessage(content="Complete", usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
+    trace.write_text(HumanMessage(content="Historical").model_dump_json() + "\n" + reply.model_dump_json() + "\n")
+    criteria.write_text('{"expected_ids": [], "finding_lines": {}}')
+    for phase, _ in limits:
+        freeze(pack, phase, case, state, trace, criteria)
+    argv = ["reportagent", "replay", str(case), "--batch", batch]
+    monkeypatch.setattr(cli, "make_model", lambda _: pytest.fail("no section selected"))
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit):
+        cli.main()
+    monkeypatch.setattr(cli, "make_model", lambda _: ScriptedModel(responses=[reply]))
+    monkeypatch.setattr(sys, "argv", [*argv, "--section", "demo"])
+    cli.main()
+    run, = tmp_path.glob("reportagent-replay-*")
+    result = json.loads((run / "results.json").read_text())
+    assert [(row["section"], row["phase"], row["phase_cap"]) for row in result] == [
+        ("demo", phase, limit) for phase, limit in limits]
+    for phase, limit in limits:
+        log, = (run / "demo").glob(f"*-{phase}.requests.jsonl")
+        assert json.loads(log.read_text().splitlines()[0])["remaining_tokens"] == limit

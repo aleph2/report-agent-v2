@@ -70,7 +70,9 @@ clarify or edit_file in revise. Unknown or disallowed calls receive a tool error
 "force-first" uses the full tool set and requests the phase's named write or edit
 on the first model request only. On Bailian this first request disables thinking
 and omits thinking_budget; later requests use their usual model settings.
-The two choices are alternatives. Verify-sources and review retain their tools.
+For verify-sources or review, setting tool_policy = "restricted" exposes read_file
+for /sources/ and write_file for this section's own work/reviews/NAME-sources.md
+or work/reviews/NAME.md, respectively. Both phases keep their full tools by default.
 Provider documentation: https://help.aliyun.com/zh/model-studio/qwen-function-calling
 
 Offline score arithmetic

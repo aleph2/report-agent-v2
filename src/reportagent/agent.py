@@ -12,10 +12,15 @@ from .models import PHASE_SETTINGS
 
 
 class PhaseTools(AgentMiddleware):
-    def __init__(self, phase, policy, case):
-        self.action = "write_file" if phase == "clarify" else "edit_file"
+    def __init__(self, phase, policy, case, section):
+        self.action = "edit_file" if phase == "revise" else "write_file"
         self.policy = policy
         self.case = case.resolve()
+        self.review_phase = phase in ("verify-sources", "review")
+        self.target = None
+        if self.review_phase and section and Path(section).name == section:
+            suffix = "-sources.md" if phase == "verify-sources" else ".md"
+            self.target = self.case / "work/reviews" / (section + suffix)
 
     def _model_request(self, request):
         if self.policy == "restricted":
@@ -35,13 +40,16 @@ class PhaseTools(AgentMiddleware):
         return await handler(self._model_request(request))
 
     def _denied(self, call):
-        if self.policy == "restricted" and call["name"] != self.action:
-            if call["name"] == "read_file":
-                path = (self.case / call["args"].get("file_path", "").lstrip("/")).resolve()
-                if path.is_relative_to(self.case / "sources"):
-                    return None
-            return ToolMessage(content=f"This phase allows reading /sources/ and {self.action}.",
-                               tool_call_id=call["id"], status="error")
+        if self.policy != "restricted":
+            return None
+        path = (self.case / call["args"].get("file_path", "").lstrip("/")).resolve()
+        if call["name"] == "read_file" and path.is_relative_to(self.case / "sources"):
+            return None
+        if call["name"] == self.action and (not self.review_phase or path == self.target):
+            return None
+        return ToolMessage(content="This file is already in your first message; use that copy. "
+                                   "This phase may read /sources/ pages and save its own file.",
+                           tool_call_id=call["id"], status="error")
 
     def wrap_tool_call(self, request, handler):
         return self._denied(request.tool_call) or handler(request)
@@ -83,7 +91,7 @@ class RevisionEdits(AgentMiddleware[RevisionState]):
         return {"next_edit": index + 1, "messages": [current], "jump_to": "tools"}
 
 
-def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None):
+def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None, section=None):
     case_dir = Path(case_dir)
     backend = FilesystemBackend(root_dir=case_dir, virtual_mode=True)
     skills = ["/work/skills/"]
@@ -97,8 +105,8 @@ def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None
             copytree(files("reportagent.skills").joinpath(skill),
                      case_dir / f"work/skills/{skill}", dirs_exist_ok=True)
     policy = PHASE_SETTINGS.get(phase, {}).get("tool_policy")
-    if phase in ("clarify", "revise") and policy in ("restricted", "force-first"):
-        middleware = [PhaseTools(phase, policy, case_dir), *middleware]
+    if policy == "restricted" or (phase in ("clarify", "revise") and policy == "force-first"):
+        middleware = [PhaseTools(phase, policy, case_dir, section), *middleware]
     return create_deep_agent(
         model=model,
         middleware=[RevisionEdits(), *middleware] if phase == "revise" else middleware,

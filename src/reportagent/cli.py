@@ -29,6 +29,8 @@ from .models import PHASE_SETTINGS, make_model
 GATHER_BUDGET_FRACTION = 0.6
 REVISION_CAPS = {"verify-sources": 80000, "review": 100000, "clarify": 40000, "revise": 80000}
 
+REPLAY_CAPS = {"verify-sources": 90000, "review": 100000, "clarify": 100000, "revise": 130000}
+REPLAY_BATCHES = {"verify-review": ("verify-sources", "review"), "clarify-revise": ("clarify", "revise")}
 
 PAGE = re.compile(r"pages?\s*(\d+)(?:\s*[-–—~～]\s*(?:pages?\s*)?(\d+))?", re.I)
 ABSENCE = re.compile(r"\b(?:missing|absent|not\s+found)\b|未(?:列|见|提供|找到|检索到|发现)|缺|不存在|无直接依据", re.I)
@@ -326,15 +328,15 @@ def _score_arithmetic(path):
         if line.startswith("#"):
             baseline = any(word in line for word in ("计算", "结论", "等级判定"))
             continuation = False
-        if "敏感性" in line[:30] and "结论" not in line[:12]:
+        if re.match(r"^(?:\(\d+\)\s*)?敏感性", line) and (line.endswith(":") or line in ("敏感性分析", "敏感性核查")):
             baseline = False
         if not baseline or not line or line.startswith(("#", "|")):
             continue
-        if re.search(r"^(?:[（(]\d+[）)]\s*)?(?:若|假设|区间核算)", line):
-            continue
+        conditional = r"若|假设|区间核算|同取区间|各指标同取|计入未定项区间|取(?:上|下)限时|时\s*[,，]\s*F"
+        line = re.sub(r"\(([^()]*?)(?:" + conditional + r")[^()]*\)", r"(\1)", line)
         statements = []
         for clause in re.split(r"[。；;]", line):
-            clause = re.split(r"若|假设|同取区间|各指标同取|计入未定项区间|时\s*[,，]\s*F", clause, maxsplit=1)[0]
+            clause = re.split(conditional, clause, maxsplit=1)[0]
             # A reported range or a list of thresholds is not a single adopted grade.
             clause = re.sub(r"(?:IV|III|II|I)级\s*[~～–—至]\s*(?:IV|III|II|I)级", "", clause)
             clause = clause.replace("风险等级判定为", "风险等级为")
@@ -499,7 +501,7 @@ def check(case, name):
     return output
 
 
-def _run_phase(case, phase, messages, limit, folder, previous_total=0):
+def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=None):
     state = {"messages": messages}
     calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
     log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
@@ -511,7 +513,7 @@ def _run_phase(case, phase, messages, limit, folder, previous_total=0):
     try:
         model = make_model(phase)
         agent = build_agent(case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
-                            phase=phase if phase in REVISION_CAPS else None)
+                            phase=phase if phase in REVISION_CAPS else None, section=section)
         # Flush each checkpoint before advancing; avoids queued background writes.
         try:
             for state in agent.stream(state, config=config, stream_mode="values", durability="sync"):
@@ -624,33 +626,35 @@ def _fixture_digest(root):
     return digest.hexdigest()
 
 
-def _replay(case, skill, historical_input):
+def _replay(case, phases, historical_input, section):
     case = case.resolve()
     root = case / "work/replay"
-    packs = sorted(p for p in root.glob("*") if p.is_dir() and not p.name.startswith("."))
+    packs = sorted(p for p in root.glob("*") if p.is_dir() and not p.name.startswith(".") and (section is None or p.name == section))
+    if len(packs) > 1:
+        sys.exit("Select one frozen section with --section.")
     if not packs:
         sys.exit(f"No frozen replay cases in {root}")
     jobs = []
-    for pack in packs:
-        shared_hash = _fixture_digest(pack / "shared")
-        for phase, phase_skill in PHASE_SKILLS.items():
-            if skill == phase_skill:
-                fixture = pack / phase
-                criteria = json.loads((fixture / "criteria.json").read_text(encoding="utf-8"))
-                baseline = json.loads((fixture / "baseline.json").read_text(encoding="utf-8"))
-                manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"))
-                expected = manifest["files"]
-                files_match = all(sha256((fixture / f).read_bytes()).hexdigest() == expected[f]
-                                  for f in ("inputs.jsonl", "criteria.json", "baseline.json"))
-                if not files_match or shared_hash != manifest["shared_sha256"] or _fixture_digest(fixture / "state") != manifest["state_sha256"]:
-                    sys.exit(f"Frozen replay input changed: {fixture}")
-                jobs.append((pack, phase, criteria, baseline))
+    pack, = packs
+    shared_hash = _fixture_digest(pack / "shared")
+    for phase in phases:
+        fixture = pack / phase
+        criteria = json.loads((fixture / "criteria.json").read_text(encoding="utf-8"))
+        baseline = json.loads((fixture / "baseline.json").read_text(encoding="utf-8"))
+        manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"))
+        expected = manifest["files"]
+        files_match = all(sha256((fixture / f).read_bytes()).hexdigest() == expected[f]
+                          for f in ("inputs.jsonl", "criteria.json", "baseline.json"))
+        if not files_match or shared_hash != manifest["shared_sha256"] or _fixture_digest(fixture / "state") != manifest["state_sha256"]:
+            sys.exit(f"Frozen replay input changed: {fixture}")
+        jobs.append((phase, criteria, baseline))
 
     output = Path(mkdtemp(prefix="reportagent-replay-", dir=case.parent))
     print("Replay output:", output)
     reports = []
-    for pack, phase, criteria, baseline in jobs:
-        name = pack.name
+    remaining = sum(REPLAY_CAPS[phase] for phase in phases)
+    name = pack.name
+    for phase, criteria, baseline in jobs:
         with TemporaryDirectory(dir=output) as directory:
             clone = Path(directory) / "case"
             copytree(pack / "shared", clone)
@@ -663,8 +667,9 @@ def _replay(case, skill, historical_input):
                             (pack / phase / "inputs.jsonl").read_text(encoding="utf-8").splitlines()]
             else:
                 messages = _revision_messages(clone, name, phase)
-            limit = 80000 if phase == "revise" else 60000
-            log, _ = _run_phase(clone, phase, messages, limit, logs)
+            limit = min(REPLAY_CAPS[phase], remaining)
+            log, used = _run_phase(clone, phase, messages, limit, logs, section=name)
+            remaining = max(0, remaining - used)
             transcript = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
             scores, details = _replay_metrics(clone, name, phase, criteria, before, transcript)
             requests = [json.loads(line) for line in log.with_suffix(".requests.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -713,11 +718,17 @@ def main():
             command.add_argument("--section")
     replay = commands.add_parser("replay", help="compare one skill on frozen phase inputs")
     replay.add_argument("case", type=Path)
-    replay.add_argument("--skill", required=True, choices=sorted(set(PHASE_SKILLS.values())))
+    selection = replay.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--skill", choices=sorted(set(PHASE_SKILLS.values())))
+    selection.add_argument("--batch", choices=REPLAY_BATCHES)
+    replay.add_argument("--section", help="exact frozen section name (required for a batch)")
     replay.add_argument("--historical-input", action="store_true", help="use the exact recorded leading messages")
     args = parser.parse_args()
     if args.command == "replay":
-        return _replay(args.case, args.skill, args.historical_input)
+        if args.batch and not args.section:
+            parser.error("--batch requires --section")
+        phases = REPLAY_BATCHES[args.batch] if args.batch else [p for p, skill in PHASE_SKILLS.items() if skill == args.skill]
+        return _replay(args.case, phases, args.historical_input, args.section)
     if args.command in ("ingest", "export"):
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
@@ -787,6 +798,6 @@ def main():
             limit = min(limit, phase_caps[phase])
         messages = (_revision_messages(args.case, args.section, phase, prompt) if phase in REVISION_CAPS
                     else [HumanMessage(content=prompt)])
-        _, used = _run_phase(args.case, phase, messages, limit, folder, total)
+        _, used = _run_phase(args.case, phase, messages, limit, folder, total, getattr(args, "section", None))
         total += used
         remaining = max(0, remaining - used)

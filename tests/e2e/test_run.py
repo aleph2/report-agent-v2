@@ -1137,3 +1137,54 @@ def test_restricted_reads_only_source_and_keeps_native_write(tmp_path, monkeypat
     tools = [m for m in result["messages"] if m.type == "tool"]
     assert tools[0].status == "error" and "Allowed source text" in tools[1].content
     assert (tmp_path / "out.md").read_text().strip() == "Saved"
+
+
+@pytest.mark.parametrize("phase,own,other", [
+    ("verify-sources", "demo-sources.md", "demo.md"), ("review", "demo.md", "demo-sources.md"),
+])
+def test_restricted_reviewer_reads_sources_and_writes_own_result(tmp_path, monkeypatch, phase, own, other):
+    monkeypatch.setitem(models.PHASE_SETTINGS[phase], "tool_policy", "restricted")
+    for name, content in [("sources/page-001.txt", "source evidence"), ("work/checks/demo.md", "checklist")]:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True)
+        path.write_text(content)
+    reviews = tmp_path / "work/reviews"
+    reviews.mkdir()
+    blocked = [call("read_file", file_path="/work/checks/demo.md"),
+               call("read_file", file_path="/sources/../work/checks/demo.md"),
+               call("write_file", file_path=f"/work/reviews/{other}", content="forbidden"),
+               call("write_file", file_path="/work/reviews/another.md", content="forbidden")]
+    replies = [*blocked, call("read_file", file_path="/sources/page-001.txt"),
+               call("write_file", file_path=f"/work/reviews/{own}", content="saved"), AIMessage(content="done")]
+    usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": usage}) for m in replies])
+    monkeypatch.setattr(cli, "make_model", lambda _: model)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "revise", str(tmp_path), "--section", "demo",
+                                     "--phases", phase, "--max-tokens", "100000"])
+    cli.main()
+    log, = phase_transcripts(tmp_path / "work/runs")
+    messages = [json.loads(line) for line in log.read_text().splitlines()]
+    tools = [m for m in messages if m["type"] == "tool"]
+    denial = "This file is already in your first message; use that copy. This phase may read /sources/ pages and save its own file."
+    assert [(m["status"], m["content"]) for m in tools[:len(blocked)]] == [("error", denial)] * len(blocked)
+    assert "source evidence" in tools[-2]["content"] and (reviews / own).read_text() == "saved"
+    assert list(reviews.iterdir()) == [reviews / own]
+
+
+@pytest.mark.parametrize("conditional_first", [False, True])
+def test_arithmetic_mixed_conditional_and_adopted_baseline(tmp_path, conditional_first):
+    path = tmp_path / "section.md"
+    table = "| 指标 | 基本分值 Rij | 权重 |\n|---|---|---|\n| X11 | 64.59 | 1 |\n\n## 结论\n"
+    conditional = "（四项全取下限时 F＝50.59、仍为Ⅲ级）"
+    for score in ("64.59", "68.59"):
+        adopted = f"总体风险算术基准值 F＝{score}，对应Ⅳ级"
+        path.write_text(table + "；".join((conditional, adopted) if conditional_first else (adopted, conditional)) + "。")
+        findings = list(cli._score_arithmetic(path))
+        if not conditional_first:
+            path.write_text(table + f"（{adopted}，若四项全取下限时 F＝50.59、仍为Ⅲ级）。")
+            assert list(cli._score_arithmetic(path)) == findings
+        if score == "64.59":
+            assert not findings
+        else:
+            mismatch, = findings
+            assert "68.59" in mismatch and "50.59" not in mismatch
