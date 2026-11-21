@@ -182,17 +182,31 @@ def _revision_input(case, name, phase, prompt):
             contents[relative] = text
         return contents[relative]
 
+    if phase == "review":
+        pattern = rf"^##[ \t]+{re.escape(name)}[ \t]*(?:\n|\Z).*?(?=^#{{1,2}}[ \t]+|\Z)"
+        entry = re.search(pattern, read("work/plan.md") or "", re.MULTILINE | re.DOTALL)
+        blocks.append("Supplied section entry from /work/plan.md:\n" + entry[0].rstrip("\n") if entry
+                      else f"No entry for ## {name} in /work/plan.md.")
+
     conflicts = {}
+    labels = {}
     if phase == "clarify":
+        labels = {review: "Review findings", section: "Section draft", official: "Official clarifications",
+                  "commission/澄清答复.md": "Owner answers"}
+        blocks.append("Use the text supplied under each labelled file path below. Missing files are marked unavailable.")
         next_number, conflicts = clarification_numbers(case)
         blocks.append(f"Next free clarification number: {next_number}.")
-        check = read(f"work/checks/{name}.md") or ""
+        check_path = f"work/checks/{name}.md"
+        check = read(check_path) or ""
         flags = [line for line in check.splitlines() if re.match(r"^clarification (?:\d+|\?) line \d+: F/grade ", line)]
         if flags:
-            blocks.append("Cross-file F/grade observations:\n" + "\n".join(flags))
+            blocks.append(f"Cross-file F/grade observations from /{check_path} (excerpt):\n" + "\n".join(flags))
         folder = root / "work/clarifications"
-        paths.extend(path.relative_to(root).as_posix() for path in sorted(folder.glob("*.md"))
-                     if path.name.startswith(f"{name}.pending."))
+        for path in sorted(folder.glob("*.md")):
+            if path.name.startswith(f"{name}.pending."):
+                relative = path.relative_to(root).as_posix()
+                paths.append(relative)
+                labels[relative] = "Pending clarifications"
     else:
         paths.append(f"work/notes/{name}.md")
     paths.append("commission/澄清答复.md")
@@ -202,7 +216,7 @@ def _revision_input(case, name, phase, prompt):
         if text is not None and phase in ("review", "revise") and relative == section:
             text = "\n".join(f"{line_no}\t{line}" for line_no, line in enumerate(text.splitlines(), 1))
         missing = "(unavailable: the verify phase saved nothing)" if relative == sources else "(unavailable)"
-        blocks.append(f"Case file: /{relative}\n" + (text if text is not None else missing))
+        blocks.append(f"{labels.get(relative, 'Case file')}: /{relative}\n" + (text if text is not None else missing))
 
     for number, locations in conflicts.items():
         for location in locations:

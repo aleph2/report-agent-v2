@@ -4,7 +4,7 @@ description: Review a drafted section against its method, cited sources and scop
 ---
 Start with the supplied numbered section, its source check, official clarifications, owner answers and notes. Use only this section’s files for section-specific evidence. If the source check is unavailable, flag it and review what the supplied material supports.
 Derived calculations (weights, products, totals) need no source page.
-Consult the section heading in /work/plan.md and the shared method notes (03-评估流程和方法.md for slopes).
+Use the supplied section entry from /work/plan.md for scope and assigned sources. Consult the shared method notes (03-评估流程和方法.md for slopes).
 Use the supplied clarifications and owner answers to check matching numbers and answers, and check that the body has no 缺失与待补充事项 section or references to that list.
 Open in full every source page the section cites for a scored value. When checking facts the notes call absent, search for this item and open in full every page the hits point to.
 When a table reaches the page bottom, open the next page before saying a row or item is absent.

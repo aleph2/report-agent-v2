@@ -972,7 +972,9 @@ def test_invalid_revision_phase_options(tmp_path, monkeypatch, options):
 @pytest.mark.parametrize("has_source_check", [True, False])
 def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch, has_source_check):
     flag = "clarification 43 line 8: F/grade 65.91/—; section states 56.49/III"
-    paths = {"work/checks/demo.md": "## Verification comparison\n" + flag + "\nNon-score finding",
+    entry = "## demo\nStake A–B; scope: cut slope\n### Assigned sources\nDesign page 96"
+    paths = {"work/plan.md": "## demo-extra\nEarlier secret\n" + entry + "\n## other\nLater secret",
+             "work/checks/demo.md": "## Verification comparison\n" + flag + "\nNon-score finding",
              "work/checks/other.md": flag.replace("43 line", "108 line"),
              "work/reviews/demo-sources.md": "Target source check", "work/reviews/other-sources.md": "Unrelated evidence",
              "work/sections/demo.md": "# Section\n\n第1段\n第2段",
@@ -983,6 +985,7 @@ def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch, has
              "commission/澄清答复.md": "29: Earlier answer\n94: Owner scope answer"}
     if not has_source_check:
         del paths["work/reviews/demo-sources.md"]
+        paths["work/plan.md"] = paths["work/plan.md"].replace("## demo\n", "## missing\n")
     for rel, text in paths.items():
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -995,9 +998,15 @@ def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch, has
     cli.main()
     review, clarify, revise = [json.loads(f.read_text().splitlines()[0])["content"]
                        for f in sorted(phase_transcripts(tmp_path / "work/runs"))]
-    for rel in ("work/reviews/demo.md", "work/sections/demo.md", "work/clarifications/demo.md",
-                "work/clarifications/demo.pending.md", "commission/澄清答复.md"):
-        assert rel in clarify and paths[rel] in clarify
+    for label, rel in (("Review findings", "work/reviews/demo.md"), ("Section draft", "work/sections/demo.md"),
+                       ("Official clarifications", "work/clarifications/demo.md"), ("Pending clarifications", "work/clarifications/demo.pending.md"),
+                       ("Owner answers", "commission/澄清答复.md")):
+        assert f"{label}: /{rel}\n{paths[rel]}" in clarify
+    assert ("Supplied section entry from /work/plan.md:\n" + entry if has_source_check else
+            "No entry for ## demo in /work/plan.md.") in review
+    assert all(secret not in review for secret in ("Earlier secret", "Later secret"))
+    assert all(entry not in msg for msg in (clarify, revise))
+    assert f"/work/checks/demo.md (excerpt):\n{flag}" in clarify
     assert flag in clarify and flag not in review and flag not in revise
     assert "Non-score finding" not in clarify and paths["work/checks/other.md"] not in clarify
     first = cli._revision_messages(tmp_path, "demo", "clarify")[0]
@@ -1171,7 +1180,7 @@ def test_restricted_file_results_match_actual_inputs(tmp_path, monkeypatch, phas
     section = "work/sections/demo.md"
     other = "work/clarifications/other.md"
     paths = {"index.md": "Source page index", "near/index.md": "Lookalike", "sources/page-001.txt": "Page content",
-             check: "Checklist" + ("" if full_check else "\n## Findings\nDiagnostic omitted"), section: "Original",
+             "work/plan.md": "## demo\nPlan excerpt\n## other\nUnrelated", check: "Checklist" + ("" if full_check else "\n## Findings\nDiagnostic omitted"), section: "Original",
              review: "Review", sources: "Verified", "work/clarifications/demo.md": "number: 2\ncontent: Official",
              other: "number: 2\ncontent: Excerpt\n---\nnumber: 4\ncontent: Extra"}
     for name, content in paths.items():
@@ -1181,7 +1190,7 @@ def test_restricted_file_results_match_actual_inputs(tmp_path, monkeypatch, phas
     supplied = {"verify-sources": check, "review": sources, "clarify": review, "revise": section}[phase]
     read = lambda name: call("read_file", file_path="/" + name)
     blocked = [read(supplied), read(other), read("near/index.md"), read("work/notes/demo.md"),
-               read("sources/../near/index.md"), read("sources/../" + supplied)]
+               read("sources/../near/index.md"), read("sources/../" + supplied), read("work/plan.md")]
     expected = [("error", READ_SCOPE)] * len(blocked)
     if phase != "verify-sources" or full_check:
         expected[0] = ("error", FIRST_COPY)
