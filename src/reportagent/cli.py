@@ -6,7 +6,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from shutil import copytree
 from tempfile import TemporaryDirectory, mkdtemp
@@ -23,7 +23,7 @@ from .agent import PHASE_SKILLS, build_agent
 from .budget import TokenCapMiddleware
 from .export.docx import clarification_numbers, export_docx
 from .ingest import ingest
-from .models import make_model
+from .models import PHASE_SETTINGS, make_model
 
 
 GATHER_BUDGET_FRACTION = 0.6
@@ -283,6 +283,75 @@ def _risk_statements(line):
             yield "基准" in grade[0], None, _written_grade(grade)
 
 
+def _score_arithmetic(path):
+    lines = [unicodedata.normalize("NFKC", re.sub(r"</?su[bp]>|\*\*|\*([FRX])\*", r"\1", line)).strip()
+             for line in path.read_text(encoding="utf-8-sig").splitlines()]
+    number = r"\d+(?:\.\d+)?"
+    total = Decimal(0)
+    rows = 0
+    start = None
+    for i, line in enumerate(lines):
+        cells = [s.strip() for s in line.strip("|").split("|")]
+        if start is None:
+            if line.startswith("|") and "权重" in line and "指标" in line:
+                score_col = next((j for j, c in enumerate(cells) if "Rij" in c and "Xij" not in c), None)
+                if score_col is not None:
+                    weight_col = next(j for j, c in enumerate(cells) if "权重" in c)
+                    start = i
+            continue
+        if not line.startswith("|"):
+            break
+        if not any(re.match(r"X\d{2}(?!\d)", c) for c in cells[:2]):
+            continue
+        score = cells[score_col] if score_col < len(cells) else ""
+        weight = cells[weight_col] if weight_col < len(cells) else ""
+        adopted = (re.fullmatch(rf"({number})(?:/\s*{number}\s*[~～至–-]\s*{number})?", score)
+                   or re.search(rf"中点\s*({number})\s*计基准", score))
+        if not adopted or not re.fullmatch(number, weight):
+            yield f"{path.stem} line {i+1}: score arithmetic unavailable for this row"
+            return
+        total += Decimal(adopted[1]) * Decimal(weight)
+        rows += 1
+    if not rows:
+        if start is not None:
+            yield f"{path.stem} line {start + 1}: score arithmetic unavailable; no indicator rows"
+        return
+    # Table 3-3 grades use strict lower bounds. Decimal half-up displays the reported precision.
+    grade = "IV" if total > 60 else "III" if total > 45 else "II" if total > 30 else "I"
+    display = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    baseline = True
+    compared = False
+    continuation = False
+    for n, line in enumerate(lines[i:], i + 1):
+        if line.startswith("#"):
+            baseline = any(word in line for word in ("计算", "结论", "等级判定"))
+            continuation = False
+        if "敏感性" in line[:30] and "结论" not in line[:12]:
+            baseline = False
+        if not baseline or not line or line.startswith(("#", "|")):
+            continue
+        if re.search(r"^(?:[（(]\d+[）)]\s*)?(?:若|假设|区间核算)", line):
+            continue
+        statements = []
+        for clause in re.split(r"[。；;]", line):
+            clause = re.split(r"若|假设|同取区间|各指标同取|计入未定项区间|时\s*[,，]\s*F", clause, maxsplit=1)[0]
+            # A reported range or a list of thresholds is not a single adopted grade.
+            clause = re.sub(r"(?:IV|III|II|I)级\s*[~～–—至]\s*(?:IV|III|II|I)级", "", clause)
+            clause = clause.replace("风险等级判定为", "风险等级为")
+            statements.extend((s, g) for _, s, g in _risk_statements(clause))
+            tail = _VALUE.match(clause.rsplit("=", 1)[-1].lstrip()) if "=" in clause else None
+            if tail and (re.search(r"\bF\s*=.*=", clause) or continuation and clause.startswith("=")):
+                statements.append((Decimal(tail[0]), None))
+        continuation = (bool(re.search(r"\bF\s*=|^=", line)) and bool(re.search(r"[×+∑Σ]", line)))
+        compared |= bool(statements)
+        mismatches = [(s, g) for s, g in dict.fromkeys(statements)
+                      if (s is not None and abs(s - total) > Decimal("0.01")) or (g and g != grade)]
+        if mismatches:
+            stated = ", ".join(f"{s if s is not None else '—'}/{g or '—'}" for s, g in mismatches)
+            yield f"{path.stem} line {n}: table F/grade {display}/{grade}; stated {stated}"
+    if not compared:
+        yield f"{path.stem}: table F/grade {display}/{grade}; no comparable baseline statement found"
+
 def _verification_comparison(case, name, section, count):
     output = []
     note = case / f"work/reviews/{name}-sources.md"
@@ -424,6 +493,9 @@ def check(case, name):
         + ("\n## Duplicate clarification numbers\n" + "\n".join(duplicates) + "\n" if duplicates else ""),
         encoding="utf-8",
     )
+    if PHASE_SETTINGS["checks"]["score_arithmetic"]:
+        for finding in _score_arithmetic(case / section_path.lstrip("/")):
+            print(finding)
     return output
 
 
@@ -629,7 +701,9 @@ def main():
         if name in ("plan", "run", "review", "revise"):
             command.add_argument("--max-tokens", type=int, required=True)
         if name in ("review", "revise", "check"):
-            command.add_argument("--section", required=True)
+            command.add_argument("--section", required=name != "check")
+        if name == "check":
+            command.add_argument("--score-arithmetic", action="store_true", help="only print score discrepancies; omit --section for all sections")
         if name == "revise":
             command.add_argument("--phases", metavar="LIST", help="Comma-separated phases in the revision workflow")
             command.add_argument("--phase-cap", action="append", default=[], metavar="NAME=N",
@@ -648,6 +722,15 @@ def main():
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
     if args.command == "check":
+        if args.score_arithmetic:
+            folder = args.case / "work/sections"
+            paths = [folder / f"{args.section}.md"] if args.section else sorted(folder.glob("*.md"))
+            for path in paths:
+                for finding in _score_arithmetic(path):
+                    print(finding)
+            return
+        if not args.section:
+            parser.error("check requires --section unless --score-arithmetic is selected")
         print(check(args.case, args.section))
         return
     phase_caps = REVISION_CAPS.copy()

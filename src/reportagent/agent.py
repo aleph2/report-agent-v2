@@ -6,7 +6,48 @@ from typing import NotRequired
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
+
+from .models import PHASE_SETTINGS
+
+
+class PhaseTools(AgentMiddleware):
+    def __init__(self, phase, policy, case):
+        self.action = "write_file" if phase == "clarify" else "edit_file"
+        self.policy = policy
+        self.case = case.resolve()
+
+    def _model_request(self, request):
+        if self.policy == "restricted":
+            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in ("read_file", self.action)])
+        if any(isinstance(m, AIMessage) for m in request.messages):
+            return request
+        # Bailian accepts a named choice only with thinking disabled on this request.
+        body = {**(getattr(request.model, "extra_body", None) or {}), **(request.model_settings.get("extra_body") or {})}
+        body.pop("thinking_budget", None)
+        return request.override(tool_choice={"type": "function", "function": {"name": self.action}},
+                                model_settings={**request.model_settings, "extra_body": {**body, "enable_thinking": False}})
+
+    def wrap_model_call(self, request, handler):
+        return handler(self._model_request(request))
+
+    async def awrap_model_call(self, request, handler):
+        return await handler(self._model_request(request))
+
+    def _denied(self, call):
+        if self.policy == "restricted" and call["name"] != self.action:
+            if call["name"] == "read_file":
+                path = (self.case / call["args"].get("file_path", "").lstrip("/")).resolve()
+                if path.is_relative_to(self.case / "sources"):
+                    return None
+            return ToolMessage(content=f"This phase allows reading /sources/ and {self.action}.",
+                               tool_call_id=call["id"], status="error")
+
+    def wrap_tool_call(self, request, handler):
+        return self._denied(request.tool_call) or handler(request)
+
+    async def awrap_tool_call(self, request, handler):
+        return self._denied(request.tool_call) or await handler(request)
 
 
 PHASE_SKILLS = {"verify-sources": "verify-sources", "review": "review-section",
@@ -55,6 +96,9 @@ def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None
         for skill in ("plan-report", "gather-evidence", "write-section", "review-section", "clarify-section"):
             copytree(files("reportagent.skills").joinpath(skill),
                      case_dir / f"work/skills/{skill}", dirs_exist_ok=True)
+    policy = PHASE_SETTINGS.get(phase, {}).get("tool_policy")
+    if phase in ("clarify", "revise") and policy in ("restricted", "force-first"):
+        middleware = [PhaseTools(phase, policy, case_dir), *middleware]
     return create_deep_agent(
         model=model,
         middleware=[RevisionEdits(), *middleware] if phase == "revise" else middleware,

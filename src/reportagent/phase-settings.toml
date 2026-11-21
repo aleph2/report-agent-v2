@@ -7,9 +7,14 @@ thinking_budget = 8000
 output_reserve = 16000
 
 [clarify]
+tool_policy = "default"
 thinking_budget = 4000
 output_reserve = 24000
 
 [revise]
+tool_policy = "default"
 thinking_budget = 6000
 output_reserve = 24000
+
+[checks]
+score_arithmetic = false

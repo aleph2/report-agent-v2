@@ -34,8 +34,7 @@ A response consisting of multiple edit_file calls is dispatched one native edit
 at a time in order. Each result is retained, including a failed match. After
 the batch, the original response and its tool results form the next model input
 and the saved transcript. Model usage is counted once per provider response.
-These are phase assignments, not enforced filesystem permissions: the proposed
-path restrictions and edit_file-only enforcement are held for the owner's decision.
+The default tool set is shared across phases. Optional phase settings are described below.
 
 Each phase saves its full transcript in work/runs/. Standalone review runs only
 the review phase. plan/run, including --write-only, are for initial drafting;
@@ -62,3 +61,29 @@ unanswered send has no provider response event. The estimate includes
 the assembled system and chat messages, tool schemas and images. LangChain uses
 1.5 characters per token and 16,384 tokens per image here. Provider tokenization,
 image handling and unreported usage can affect accuracy.
+
+Optional phase tool settings (off by default)
+
+In phase-settings.toml, clarify.tool_policy and revise.tool_policy default to
+"default". "restricted" exposes read_file for /sources/ plus write_file in
+clarify or edit_file in revise. Unknown or disallowed calls receive a tool error.
+"force-first" uses the full tool set and requests the phase's named write or edit
+on the first model request only. On Bailian this first request disables thinking
+and omits thinking_budget; later requests use their usual model settings.
+The two choices are alternatives. Verify-sources and review retain their tools.
+Provider documentation: https://help.aliyun.com/zh/model-studio/qwen-function-calling
+
+Offline score arithmetic
+
+  python -m reportagent check CASE --score-arithmetic [--section NAME]
+
+This read-only mode prints discrepancies to stdout. Omitting NAME checks every
+section file. With checks.score_arithmetic = true, the regular section check also
+prints the arithmetic diagnostics. Its existing checklist contents are unchanged.
+The setting defaults to false. The check multiplies the adopted R by its weight
+in each indicator row, including an explicitly specified baseline midpoint. An
+unresolved score or weight makes that table unavailable for comparison. The check
+compares the baseline with the calculation and conclusion; alternative scenarios
+and interval endpoints have separate meanings. Absolute score differences greater
+than 0.01 and grade differences are reported. Table 3-3 boundaries are 30, 45 and
+60, with equality in the lower grade. This checks consistency of recorded numbers.

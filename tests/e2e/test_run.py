@@ -1,4 +1,5 @@
 import base64
+from decimal import Decimal
 import json
 from io import BytesIO
 import time
@@ -1053,3 +1054,85 @@ def test_resume_between_revision_edits_preserves_batch(tmp_path, monkeypatch):
     assert len(received) == 2
     assert [[c["id"] for c in m.tool_calls] for m in received[1] if m.type == "ai"] == [["one", "two"]]
     assert [m.tool_call_id for m in received[1] if m.type == "tool"] == ["one", "two"]
+
+
+@pytest.mark.parametrize("phase,write", [("clarify", "write_file"), ("revise", "edit_file")])
+@pytest.mark.parametrize("policy", ["restricted", "force-first"])
+def test_phase_tool_policy(tmp_path, monkeypatch, phase, write, policy):
+    seen = []
+    def bind(self, tools, **kwargs):
+        seen.append(({t.name for t in tools}, kwargs))
+        return self.bind(tools=tools, **kwargs)
+    monkeypatch.setattr(ScriptedModel, "bind_tools", bind)
+    monkeypatch.setitem(models.PHASE_SETTINGS[phase], "tool_policy", policy)
+    model = ScriptedModel(responses=[call("ls", path="/"), AIMessage(content="done")])
+    state = cli.build_agent(tmp_path, model, phase=phase).invoke({"messages": [("human", "Work.")]})
+    assert len(seen) == 2
+    if policy == "restricted":
+        assert all(names == {"read_file", write} for names, _ in seen)
+        assert any(m.type == "tool" and m.status == "error" for m in state["messages"])
+    else:
+        assert "ls" in seen[0][0] and "ls" in seen[1][0]
+        assert seen[0][1]["tool_choice"] == {"type": "function", "function": {"name": write}}
+        assert not seen[1][1].get("tool_choice")
+
+
+def test_score_arithmetic_only_reports_baseline_discrepancies(tmp_path, monkeypatch, capsys):
+    folder = tmp_path / "work/sections"
+    folder.mkdir(parents=True)
+    path = folder / "demo.md"
+    text = """| 指标 | 基本分值 Rij | 权重 γij | 评估分值 Xij |
+|---|---|---|---|
+| X11 | 74 | 0.5 | 37.00 |
+| X21 | 68.5 | 0.5 | 34.25 |
+
+## 风险计算与等级判定
+*F* = Σ*X* = 30（X11）+32.21（X21）=**62.21**
+敏感性核查：
+若地下水位上升，F=53.00，风险等级为Ⅲ级。
+## 评估结论
+总体风险值 F=71.24，风险等级为Ⅲ级，若降雨则 F=53.00。
+"""
+    path.write_text(text)
+    monkeypatch.setattr(sys, "argv", ["reportagent", "check", str(tmp_path), "--score-arithmetic"])
+    cli.main()
+    output = capsys.readouterr().out
+    assert "71.25/IV" in output and "62.21" in output and "III" in output
+    assert "53.00" not in output and "stated 30/" not in output and "line 9" not in output
+    assert path.read_text() == text and list((tmp_path / "work").iterdir()) == [folder]
+    notes = tmp_path / "work/notes"
+    notes.mkdir()
+    (notes / "demo.md").write_text("")
+    original = cli.check(tmp_path, "demo").read_bytes()
+    assert not capsys.readouterr().out
+    monkeypatch.setitem(models.PHASE_SETTINGS["checks"], "score_arithmetic", True)
+    assert cli.check(tmp_path, "demo").read_bytes() == original and "71.25/IV" in capsys.readouterr().out
+
+
+
+@pytest.mark.parametrize("score,grade", [("30", "I"), ("45", "II"), ("60", "III"), ("60.02", "IV")])
+def test_arithmetic_thresholds_and_exact_tolerance(tmp_path, score, grade):
+    source = tmp_path / "risk.md"
+    section = f"| 指标 | 基本分值 Rij | 权重 | 评估分值 |\n|---|---|---|---|\n| X11 | {score} | 1 | 0 |\n\n## 评估结论\n"
+    source.write_text(section + f"F={Decimal(score)+Decimal('0.01')}，风险等级为{grade}级。")
+    assert not list(cli._score_arithmetic(source))
+    source.write_text(section + f"F={Decimal(score)+Decimal('0.02')}，风险等级为{grade}级。")
+    mismatch, = cli._score_arithmetic(source)
+    assert f"/{grade};" in mismatch
+    source.write_text(section.replace(f"| {score} | 1 |", "| 未定 | 1 |") + "F=12")
+    assert "unavailable" in next(cli._score_arithmetic(source))
+
+
+def test_restricted_reads_only_source_and_keeps_native_write(tmp_path, monkeypatch):
+    monkeypatch.setitem(models.PHASE_SETTINGS["clarify"], "tool_policy", "restricted")
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "sources/page-001.txt").write_text("Allowed source text")
+    (tmp_path / "notes.md").write_text("Outside sources")
+    model = ScriptedModel(responses=[call("read_file", file_path="/notes.md"),
+                                     call("read_file", file_path="/sources/page-001.txt"),
+                                     call("write_file", file_path="/out.md", content="Saved"),
+                                     AIMessage(content="done")])
+    result = cli.build_agent(tmp_path, model, phase="clarify").invoke({"messages": [("human", "Work.")]})
+    tools = [m for m in result["messages"] if m.type == "tool"]
+    assert tools[0].status == "error" and "Allowed source text" in tools[1].content
+    assert (tmp_path / "out.md").read_text().strip() == "Saved"
