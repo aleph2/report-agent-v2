@@ -84,12 +84,15 @@ def test_final_save_turn(tmp_path, costs, limit, calls, used, saved, writing):
 
 
 @pytest.mark.parametrize("info,guard", [(True, False), (False, True), (True, True)])
-def test_preflight_budget_at_provider_boundary(tmp_path, info, guard):
+def test_preflight_budget_at_provider_boundary(tmp_path, monkeypatch, info, guard):
     import httpx
-    from langchain_openai import ChatOpenAI
-    from deepagents import register_harness_profile
-    from reportagent.models import RUN_PROFILE
-    register_harness_profile("openai:offline", RUN_PROFILE)
+    from functools import partial
+    from reportagent import models
+    model_name = "qwen4-max" if guard else "offline"
+    monkeypatch.setenv("REVIEW_MODEL_NAME", model_name)
+    monkeypatch.setenv("THINKING_BUDGET_MODEL", "qwen4-max")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://offline.invalid/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "offline")
 
     log = tmp_path / "requests.jsonl"
     cap = TokenCapMiddleware(60_000, phase="revise", info=info, guard=guard, request_log=log)
@@ -97,6 +100,10 @@ def test_preflight_budget_at_provider_boundary(tmp_path, info, guard):
 
     def reply(request):
         body = json.loads(request.content)
+        assert body["model"] == model_name
+        assert body.get("thinking_budget") == (6000 if model_name == "qwen4-max" else None)
+        assert any("Submit your edits in your first response" in str(m["content"])
+                   for m in body["messages"] if m["role"] in ("system", "developer"))
         entry = json.loads(log.read_text().splitlines()[-1])
         remaining = 1_000 if payloads else 60_000
         assert entry["decision"] == "send" and entry["remaining_tokens"] == remaining
@@ -123,8 +130,8 @@ def test_preflight_budget_at_provider_boundary(tmp_path, info, guard):
         })
 
     with httpx.Client(transport=httpx.MockTransport(reply)) as client:
-        model = ChatOpenAI(model="offline", api_key="offline", base_url="https://offline.invalid/v1",
-                           http_client=client, max_retries=0)
+        monkeypatch.setattr(models, "init_chat_model", partial(models.init_chat_model, http_client=client))
+        model = models.make_model("revise")
         result = build_agent(tmp_path, model, phase="revise", middleware=[cap]).invoke(
             {"messages": [("user", "Revise.")]}
         )
@@ -143,13 +150,14 @@ def test_preflight_budget_at_provider_boundary(tmp_path, info, guard):
         assert "1000" in payloads[-1]["messages"][-1]["content"].replace(",", "")
 
 
-def test_cli_guard_stops_oversized_first_input(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("words", [10, 3000])
+def test_cli_guard_stops_oversized_first_input(tmp_path, monkeypatch, capsys, words):
     import sys
     from reportagent import cli
 
     section = tmp_path / "work/sections/left.md"
     section.parent.mkdir(parents=True)
-    section.write_text("stratum " * 3_000)
+    section.write_text("stratum " * words)
     model = ScriptedModel(responses=[AIMessage(content="Unused.")])
     monkeypatch.setattr(cli, "make_model", lambda phase: model)
     monkeypatch.setattr(ScriptedModel, "_generate", lambda *args, **kwargs: pytest.fail("Guard sent oversized input"))
@@ -160,7 +168,8 @@ def test_cli_guard_stops_oversized_first_input(tmp_path, monkeypatch, capsys):
     sidecar, = (tmp_path / "work/runs").glob("*-revise.requests.jsonl")
     entry = json.loads(sidecar.read_text())
     assert entry["decision"] == "stop" and entry["remaining_tokens"] == 20_000
-    assert entry["estimated_input_tokens"] > 20_000
+    assert (entry["estimated_input_tokens"] > 20_000) == (words == 3000)
+    assert entry["estimated_input_tokens"] + entry["output_reserve"] > entry["remaining_tokens"]
     assert "Reported tokens: 0" in capsys.readouterr().out
 
 

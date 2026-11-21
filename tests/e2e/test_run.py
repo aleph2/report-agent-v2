@@ -892,6 +892,14 @@ def test_clarification_collisions_check_export_and_resolution(tmp_path):
         data = rows()
         assert [r[-3:] for r in data if r[0] in ("94", "88")] == [["编号冲突", "", ""]] * 3
         assert next(r[-2:] for r in data if r[0] == "29") == ["Valid answer", "Owner"]
+    pending = b.with_name("a.pending.md")
+    b.rename(pending)
+    collision = next(line for line in cli.check(tmp_path, "a").read_text().splitlines() if "duplicate clarification 94:" in line)
+    assert "/work/clarifications/a.md:1" in collision and "/work/clarifications/a.pending.md:1" in collision
+    archive = tmp_path / "work/archive"
+    archive.mkdir()
+    pending.rename(archive / pending.name)
+    assert "duplicate clarification 94:" not in cli.check(tmp_path, "a").read_text()
     b.write_text(item.format(96))
     answers.write_text("94: Scope answer\n29: Valid answer\n88: Settled\n")
     data = rows()
@@ -946,7 +954,8 @@ def test_invalid_revision_phase_options(tmp_path, monkeypatch, options):
     assert error.value.code == 2 and not (tmp_path / "work/runs").exists()
 
 
-def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize("has_source_check", [True, False])
+def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch, has_source_check):
     paths = {"work/reviews/demo-sources.md": "Target source check", "work/reviews/other-sources.md": "Unrelated evidence",
              "work/sections/demo.md": "# Section\n\n第1段\n第2段",
              "work/reviews/demo.md": "Review finding", "work/notes/demo.md": "Working notes",
@@ -954,6 +963,8 @@ def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
              "work/clarifications/demo.pending.md": "number: 96\ncontent: Proposed question",
              "work/clarifications/method.md": "number: 2\ncontent: Other\n---\nnumber: 94\ncontent: Scope question\n  continuation\nstatus: Open\n---\nnumber: 3\ncontent: Other",
              "commission/澄清答复.md": "29: Earlier answer\n94: Owner scope answer"}
+    if not has_source_check:
+        del paths["work/reviews/demo-sources.md"]
     for rel, text in paths.items():
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -978,7 +989,9 @@ def test_review_clarify_and_revise_receive_case_files(tmp_path, monkeypatch):
     assert "1\t# Section\n2\t\n3\t第1段\n4\t第2段" in revise
     assert "Proposed question" not in revise
     assert paths["commission/澄清答复.md"] in revise
-    for rel in ("work/reviews/demo-sources.md", "work/clarifications/demo.md", "commission/澄清答复.md", "work/notes/demo.md"):
+    evidence = paths.get("work/reviews/demo-sources.md", "(unavailable: the verify phase saved nothing)")
+    assert f"Case file: /work/reviews/demo-sources.md\n{evidence}" in review
+    for rel in ("work/clarifications/demo.md", "commission/澄清答复.md", "work/notes/demo.md"):
         assert paths[rel] in review
     assert "3\t第1段" in review and "Unrelated evidence" not in review
 

@@ -25,6 +25,7 @@ An agent system that writes an assessment report from supplied source documents 
 - Do not add a dependency, a module, a tool, a `raise` or a database table unless the task says so. If you think one is needed, stop and ask.
 - If you are unsure what the owner wants, ask before writing code.
 - One task is one commit on a branch. The owner and Claude review it before anything else starts.
+- Before every merge and on the merged commit, run the offline canonical check/export comparison in [the merge regression routine](docs/regression.md). Include every difference in the task report. Explain unexpected differences to Claude before merging.
 - With each commit, say in plain words: what you changed, how you ran it, what you did not do, and anything you are unsure about.
 - No paid model call, ever, unless the owner approved that run in writing. Tests use a scripted fake model.
 
