@@ -61,7 +61,9 @@ def test_skill_replay_runs_in_isolation_on_frozen_inputs(tmp_path, monkeypatch, 
     assert m["must_fix_touched"]["label"] == "edits touching finding lines"
     req, = (run / "demo").glob("*.requests.jsonl")
     assert json.loads(req.read_text().splitlines()[0])["remaining_tokens"] == result["phase_cap"] == 130000
-    assert {p.name for p in (case / "work").iterdir()} == {"replay"}
+    assert {p.name for p in (case / "work").iterdir()} == {"replay", "learn"}
+    signal, = (case / "work/learn/signals").glob("*.json")
+    assert json.loads(signal.read_text())["header"]["command"] == "replay"
 
 
 def test_replay_refuses_missing_fixture_before_model(tmp_path, monkeypatch):
