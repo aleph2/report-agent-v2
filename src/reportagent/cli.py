@@ -136,6 +136,23 @@ def _verification_input(case, name, top):
     return HumanMessage(content=blocks if len(blocks) > 1 else top)
 
 
+def _revision_messages(case, name, phase, prompt=None):
+    if prompt is None:
+        prompt = {
+            "verify-sources": f"verify-sources for section {name} using the supplied list from /work/checks/{name}.md. "
+                              f"Save the source checks to /work/reviews/{name}-sources.md.",
+            "review": f"review section {name} using the supplied case files. Save the review to /work/reviews/{name}.md.",
+            "clarify": f"clarify section {name}: complete /work/clarifications/{name}.md "
+                       f"from /work/reviews/{name}.md, /work/sections/{name}.md and /commission/澄清答复.md.",
+            "revise": f"revise section {name} using /work/reviews/{name}.md and the completed "
+                      f"/work/clarifications/{name}.md. Save edits to /work/sections/{name}.md.",
+        }[phase]
+    if phase == "verify-sources":
+        top = (case / f"work/checks/{name}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]
+        return [_verification_input(case, name, top), HumanMessage(content=prompt)]
+    return [HumanMessage(content=_revision_input(case, name, phase, prompt))]
+
+
 def _revision_input(case, name, phase, prompt):
     root = case.resolve()
     review = f"work/reviews/{name}.md"
@@ -535,7 +552,7 @@ def _fixture_digest(root):
     return digest.hexdigest()
 
 
-def _replay(case, skill):
+def _replay(case, skill, historical_input):
     case = case.resolve()
     root = case / "work/replay"
     packs = sorted(p for p in root.glob("*") if p.is_dir() and not p.name.startswith("."))
@@ -547,8 +564,6 @@ def _replay(case, skill):
         for phase, phase_skill in PHASE_SKILLS.items():
             if skill == phase_skill:
                 fixture = pack / phase
-                messages = [HumanMessage.model_validate_json(line) for line in
-                            (fixture / "inputs.jsonl").read_text(encoding="utf-8").splitlines()]
                 criteria = json.loads((fixture / "criteria.json").read_text(encoding="utf-8"))
                 baseline = json.loads((fixture / "baseline.json").read_text(encoding="utf-8"))
                 manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"))
@@ -557,12 +572,12 @@ def _replay(case, skill):
                                   for f in ("inputs.jsonl", "criteria.json", "baseline.json"))
                 if not files_match or shared_hash != manifest["shared_sha256"] or _fixture_digest(fixture / "state") != manifest["state_sha256"]:
                     sys.exit(f"Frozen replay input changed: {fixture}")
-                jobs.append((pack, phase, messages, criteria, baseline))
+                jobs.append((pack, phase, criteria, baseline))
 
     output = Path(mkdtemp(prefix="reportagent-replay-", dir=case.parent))
     print("Replay output:", output)
     reports = []
-    for pack, phase, messages, criteria, baseline in jobs:
+    for pack, phase, criteria, baseline in jobs:
         name = pack.name
         with TemporaryDirectory(dir=output) as directory:
             clone = Path(directory) / "case"
@@ -571,7 +586,13 @@ def _replay(case, skill):
             before = (clone / f"work/sections/{name}.md").read_text(encoding="utf-8").splitlines()
             logs = output / name
             logs.mkdir(exist_ok=True)
-            log, _ = _run_phase(clone, phase, messages, 60000, logs)
+            if historical_input:
+                messages = [HumanMessage.model_validate_json(line) for line in
+                            (pack / phase / "inputs.jsonl").read_text(encoding="utf-8").splitlines()]
+            else:
+                messages = _revision_messages(clone, name, phase)
+            limit = 80000 if phase == "revise" else 60000
+            log, _ = _run_phase(clone, phase, messages, limit, logs)
             transcript = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
             scores, details = _replay_metrics(clone, name, phase, criteria, before, transcript)
             requests = [json.loads(line) for line in log.with_suffix(".requests.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -590,7 +611,10 @@ def _replay(case, skill):
                                     "edits_rejected", "total_tokens", "reasoning_tokens")
                     change = "better" if (actual < prior) == lower else "worse"
                 comparison[key] = dict(baseline=prior, actual=actual, change=change)
-            result = dict(section=name, phase=phase, metrics=comparison, **details)
+            if phase == "revise":
+                comparison["must_fix_touched"]["label"] = "edits touching finding lines"
+            result = dict(section=name, phase=phase, phase_cap=limit, input_mode="historical" if historical_input else "current",
+                          metrics=comparison, **details)
             reports.append(result)
             (output / "results.json").write_text(json.dumps(reports, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             print(json.dumps(result, ensure_ascii=False))
@@ -616,9 +640,10 @@ def main():
     replay = commands.add_parser("replay", help="compare one skill on frozen phase inputs")
     replay.add_argument("case", type=Path)
     replay.add_argument("--skill", required=True, choices=sorted(set(PHASE_SKILLS.values())))
+    replay.add_argument("--historical-input", action="store_true", help="use the exact recorded leading messages")
     args = parser.parse_args()
     if args.command == "replay":
-        return _replay(args.case, args.skill)
+        return _replay(args.case, args.skill, args.historical_input)
     if args.command in ("ingest", "export"):
         print({"ingest": ingest, "export": export_docx}[args.command](args.case))
         return
@@ -644,18 +669,7 @@ def main():
     if args.command == "plan":
         phases = (("plan", "Plan the report requested in /commission/."),)
     elif args.command == "revise":
-        name = args.section
-        phases = (
-            ("verify-sources", f"verify-sources for section {name} using the supplied list from /work/checks/{name}.md. "
-             f"Save the source checks to /work/reviews/{name}-sources.md."),
-            ("review", f"review section {name} using the supplied case files. "
-             f"Save the review to /work/reviews/{name}.md."),
-            ("clarify", f"clarify section {name}: complete /work/clarifications/{name}.md "
-             f"from /work/reviews/{name}.md, /work/sections/{name}.md and /commission/澄清答复.md."),
-            ("revise", f"revise section {name} using /work/reviews/{name}.md and the completed "
-             f"/work/clarifications/{name}.md. Save edits to /work/sections/{name}.md."),
-        )
-        phases = [(phase, prompt) for phase, prompt in phases if phase in selected]
+        phases = [(phase, None) for phase in REVISION_CAPS if phase in selected]
     elif args.command == "review":
         name = args.section
         phases = (("review", f"Review section {name}. "
@@ -688,12 +702,8 @@ def main():
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
         if phase in REVISION_CAPS:
             limit = min(limit, phase_caps[phase])
-        if phase in ("review", "clarify", "revise"):
-            prompt = _revision_input(args.case, args.section, phase, prompt)
-        state = {"messages": [HumanMessage(content=prompt)]}
-        if phase == "verify-sources":
-            top = (args.case / f"work/checks/{args.section}.md").read_text(encoding="utf-8").partition("\n## Findings")[0]
-            state["messages"].insert(0, _verification_input(args.case, args.section, top))
-        _, used = _run_phase(args.case, phase, state["messages"], limit, folder, total)
+        messages = (_revision_messages(args.case, args.section, phase, prompt) if phase in REVISION_CAPS
+                    else [HumanMessage(content=prompt)])
+        _, used = _run_phase(args.case, phase, messages, limit, folder, total)
         total += used
         remaining = max(0, remaining - used)

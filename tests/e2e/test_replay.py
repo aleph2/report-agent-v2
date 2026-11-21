@@ -10,7 +10,8 @@ from tests.fake_model import ScriptedModel, call
 from scripts.freeze_replay import freeze
 
 
-def test_skill_replay_runs_in_isolation_on_frozen_inputs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("historical", [False, True])
+def test_skill_replay_runs_in_isolation_on_frozen_inputs(tmp_path, monkeypatch, historical):
     case = tmp_path / "original"
     pack = case / "work/replay/demo"
     (pack / "shared").mkdir(parents=True)
@@ -40,7 +41,8 @@ def test_skill_replay_runs_in_isolation_on_frozen_inputs(tmp_path, monkeypatch):
         assert phase == "revise"
         return model
     monkeypatch.setattr(cli, "make_model", model_for)
-    monkeypatch.setattr(sys, "argv", ["reportagent", "replay", str(case), "--skill", "write-section"])
+    monkeypatch.setattr(sys, "argv", ["reportagent", "replay", str(case), "--skill", "write-section"]
+                        + (["--historical-input"] if historical else []))
     cli.main()
     run, = tmp_path.glob("reportagent-replay-*")
     result, = json.loads((run / "results.json").read_text())
@@ -50,9 +52,15 @@ def test_skill_replay_runs_in_isolation_on_frozen_inputs(tmp_path, monkeypatch):
     assert m["reasoning_tokens"]["actual"] == 9 and m["total_tokens"]["actual"] == 141
     assert m["duplicate_numbers"]["actual"] == 1 and section.read_text() == "first\ncited\nlast"
     log, = (run / "demo").glob("*-revise.jsonl")
-    assert json.loads(log.read_text().splitlines()[0])["content"] == "Exact frozen input"
+    content = json.loads(log.read_text().splitlines()[0])["content"]
+    if historical:
+        assert content == "Exact frozen input"
+    else:
+        assert "revise section demo" in content and "2\tcited" in content and "Exact frozen input" not in content
+    assert result["input_mode"] == ("historical" if historical else "current")
+    assert m["must_fix_touched"]["label"] == "edits touching finding lines"
     req, = (run / "demo").glob("*.requests.jsonl")
-    assert json.loads(req.read_text().splitlines()[0])["remaining_tokens"] == 60000
+    assert json.loads(req.read_text().splitlines()[0])["remaining_tokens"] == result["phase_cap"] == 80000
     assert {p.name for p in (case / "work").iterdir()} == {"replay"}
 
 
@@ -72,6 +80,8 @@ def test_freeze_and_replay_counts_only_ids_saved_by_this_run(tmp_path, monkeypat
     path = state / target.lstrip("/")
     path.parent.mkdir()
     path.write_text("| 1 | already present |")
+    (state / "work/checks").mkdir()
+    (state / "work/checks/demo.md").write_text("Current frozen checklist\n## Findings\nOld diagnostics")
     prompt = [HumanMessage(content=[{"type": "text", "text": "checklist"}]), HumanMessage(content="Save demo")]
     reply = call("write_file", file_path=target, content="| 1 | old |\n| 1 | old |\n| 3 | extra |")
     rows = [*prompt, reply, ToolMessage(content="Updated file " + target, tool_call_id="write_file")]
@@ -92,6 +102,10 @@ def test_freeze_and_replay_counts_only_ids_saved_by_this_run(tmp_path, monkeypat
     run, = tmp_path.glob("reportagent-replay-*")
     result, = json.loads((run / "results.json").read_text())
     assert result["metrics"]["source_ids_saved"] == dict(baseline=1, actual=0, change="worse")
+    log, = (run / "demo").glob("*-verify-sources.jsonl")
+    rebuilt = [json.loads(line)["content"] for line in log.read_text().splitlines()[:2]]
+    assert rebuilt[0] == "Current frozen checklist" and "Save the source checks" in rebuilt[1]
+    assert result["phase_cap"] == 60000
     assert result["missing_ids"] == [1, 2] and result["execution_status"] == "completed"
     (fixture / "inputs.jsonl").write_text(HumanMessage(content="altered").model_dump_json())
     with pytest.raises(SystemExit, match="changed"):

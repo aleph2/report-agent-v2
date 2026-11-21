@@ -10,21 +10,23 @@ After obtaining a grant for a live batch, run from the repository root:
 .venv/bin/python -m reportagent replay cases/g4-contract1 --skill verify-sources
 ```
 
-| Skill | Replayed phase |
-|---|---|
-| verify-sources | verify-sources |
-| review-section | review |
-| clarify-section | clarify |
-| write-section | revise |
+| Skill | Replayed phase | Phase cap |
+|---|---|---:|
+| verify-sources | verify-sources | 60,000 |
+| review-section | review | 60,000 |
+| clarify-section | clarify | 60,000 |
+| write-section | revise | 80,000 |
 
-The command selects the corresponding phase for each frozen section, verifies the input hashes, then invokes the normal agent with the current model settings, a 60,000-token phase cap, the pre-request guard and the normal call limit. Each phase starts in a separate copy. The command prints the result and saves `results.json`, transcripts and request sidecars in a new `reportagent-replay-*` directory beside the real case. Only the temporary case copy is discarded. A `blocked_before_send` result means the configured input estimate and output reserve did not fit the cap.
+By default, the production revision command and replay build the same leading messages from the supplied case files. Replay reads its isolated, frozen pre-phase copy. Add `--historical-input` to use the exact recorded leading messages. Each result records `input_mode` (current or historical) and `phase_cap`. The four phase caps total 260,000 tokens per section.
+
+The command selects the corresponding phase for each frozen section, verifies the input hashes, then invokes the normal agent with the current model settings, the phase cap above, the pre-request guard and the normal call limit. Each phase starts in a separate copy. The command prints the result and saves `results.json`, transcripts and request sidecars in a new `reportagent-replay-*` directory beside the real case. Only the temporary case copy is discarded. A `blocked_before_send` result means the configured input estimate and output reserve did not fit the cap.
 
 ## Measured outcomes
 
-Each metric includes the historical baseline, observed value and direction. More expected source IDs saved, cited findings touched, successful edits, actual saves, first-response saves and matching F/grade statements are favorable. Fewer duplicate numbers, F/grade discrepancies, rejected edits, submitted attempts and tokens are favorable. Attempt count measures workload. Read it alongside successful work and target saves. A cheaper run that does no work can still have worse coverage.
+Each metric includes the historical baseline, observed value and direction. More expected source IDs saved, successful edits, actual saves, first-response saves and matching F/grade statements are favorable. Fewer duplicate numbers, F/grade discrepancies, rejected edits, submitted attempts and tokens are favorable. Attempt count measures workload. Read it alongside successful work and target saves. A cheaper run that does no work can still have worse coverage.
 
 - Verification counts distinct expected IDs only following a successful save of the phase target. Extra and missing IDs are listed.
-- Revision counts a finding once if the saved section changed at least one of its frozen, cited original lines. Original-to-final line differences exclude pure insertions between unchanged lines and reverted changes. The measure tracks editing at the cited location. A reviewer decides whether it resolved the finding.
+- The revision metric “edits touching finding lines” counts a distinct finding once if the saved section changed at least one of its frozen, cited original lines. Original-to-final line differences exclude pure insertions between unchanged lines and reverted changes. The measure tracks editing at the cited location. A reviewer decides whether it resolved the finding.
 - The existing clarification-number inventory and F/grade comparison supply cross-file counts. If there are zero comparable statements, zero agreements provide no evidence of agreement.
 - Native tool results are paired with calls within the same response. Submitted edits without a result are identified separately. A first-response save requires a successful tool result for the correct target.
 - Reasoning tokens are part of total tokens. An absent provider count yields `unknown` for that comparison. Baselines are observed historical runs, possibly under a different cap, skill or input layout. One changed number cannot establish which factor caused it.
