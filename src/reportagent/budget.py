@@ -85,10 +85,14 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
                 log.write(json.dumps(dict(request=self.request_number, **fields)) + "\n")
 
     def _prepare(self, request):
+        # Price the usual tool set conservatively even when the final request offers only a save.
+        tools = request.tools
+        if request.state.get("final_save_rule"):
+            save = "edit_file" if self.phase == "revise" else "write_file"
+            request = request.override(tools=[tool for tool in request.tools if getattr(tool, "name", None) == save])
         if not (self.info or self.guard):
             return request
         messages = ([request.system_message] if request.system_message else []) + request.messages
-        tools = request.tools
         prompt = (messages, tools, request.model)
         base, chars_per_token = 0, 1.5
         if self._anchor is not None:
@@ -184,7 +188,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
             if self.info:
                 save += f" Remaining allowance: {self.max_tokens - total} tokens."
             return {"final_save_rule": "remaining < 2 * (previous input + output reserve)", "messages": [HumanMessage(
-                content="Token budget reached. " + save
+                content="This is the last response this phase can make; save your file now. " + save
             )]}
         # Keep pending tool calls and their results together before adding the note.
         if self.remind and total >= self.max_tokens / 2 and not state.get("budget_note_sent"):

@@ -52,7 +52,11 @@ exact model ID. Only calls to that model in those four phases send thinking_budg
 An admitted request limits max_completion_tokens to the allowance less estimated
 input. After a response reporting input usage, the next turn requests a final
 save when the remaining allowance falls below twice the previous reported input
-plus twice the phase reserve. The same admission check applies to that turn.
+plus twice the phase reserve. This last request offers only edit_file for revise
+or write_file for any other phase. Admission still prices the normal tool set.
+The offline revise --preflight output includes conservative_floor_3, three times
+the estimated first input plus three output reserves. Later tool results can
+increase input beyond that estimate.
 The guard and request log are always enabled. Each decision is appended before
 transport to work/runs/<timestamp>-<phase>.requests.jsonl, with estimated input,
 remaining tokens, reserve, maximum output and send/stop decision. A response
@@ -70,10 +74,12 @@ Each may read /index.md to map cited pages to /sources/ and use read_file under 
 only for their own work/reviews/NAME-sources.md and work/reviews/NAME.md files,
 respectively. Direct build_agent callers for these phases pass section=NAME.
 Clarify uses write_file and revise uses edit_file. Disallowed calls
-return a tool error. A denied read gets the first-message reminder only for a file
-delivered in full. Partial checklist text, claim excerpts and unavailable files get
-the general path guidance. Older frozen messages without a delivery record also
-use the general guidance. Omitting tool_policy restores the full tool set in that phase.
+return a tool error. The first message lists files included in full, including any
+source pages attached for verification. A refused read repeats that list when
+available. Case launchers that attach whole files should add their case-relative
+paths to the first message’s supplied_files metadata. Excerpts and unavailable
+files are omitted. Older frozen messages
+without a delivery record receive general path guidance. Omitting tool_policy restores the full tool set in that phase.
 For clarify and revise, "force-first" uses all tools and requests the phase's named
 write or edit on its first request. On Bailian that request disables thinking
 and omits thinking_budget. Later requests use their usual model settings.

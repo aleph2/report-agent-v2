@@ -73,7 +73,7 @@ def test_final_save_turn(tmp_path, costs, limit, calls, used, saved, writing):
     cap.output_reserve = 1  # One token reserved for the scripted write.
     result = build_agent(tmp_path, model, middleware=[cap]).invoke({"messages": [("user", "Read the case.")]})
     assert model.i == calls and result["total_tokens"] == used
-    notes = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.text == "Token budget reached. Save your work now in one write; do not read anything more."]
+    notes = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.text == "This is the last response this phase can make; save your file now. Save your work now in one write; do not read anything more."]
     assert len(notes) == int(saved) and (tmp_path / "saved.md").exists() is (saved and writing)
     if saved:
         if writing:
@@ -148,7 +148,8 @@ def test_preflight_budget_at_provider_boundary(tmp_path, monkeypatch, info, guar
         assert entries[-1]["decision"] == "stop" and "cap" in result["messages"][-1].text.lower()
     else:
         assert len(payloads) == 2 and result["total_tokens"] == 59_010
-        assert "1000" in payloads[-1]["messages"][-1]["content"].replace(",", "")
+        assert payloads[-1]["messages"][-1]["content"].endswith("Remaining allowance: 1000 tokens.")
+        assert [t["function"]["name"] for t in payloads[-1]["tools"]] == ["edit_file"]
 
 
 @pytest.mark.parametrize("words", [10, 3000])
