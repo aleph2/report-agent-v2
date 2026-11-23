@@ -104,3 +104,21 @@ def test_client_audience_flags_and_feedback(tmp_path):
     official.write_text(official.read_text().replace("audience: method", "audience: client", 1))
     export_docx(tmp_path)
     assert _old_answers(sheet, cfg)[1][1:] == [answer["answer"], "Owner"]
+
+
+def test_readiness_flags_case_paths_and_commission_markdown(tmp_path):
+    from reportagent.export.docx import section_flags
+
+    (tmp_path / "commission").mkdir()
+    (tmp_path / "commission/owner-notes.md").touch()
+    (tmp_path / "work/sections").mkdir(parents=True)
+    (tmp_path / "work/sections/demo.md").write_text(
+        "commission/owner-notes.md\nowner-notes.md\n/sources/design.pdf\n"
+        "work\\notes\\page.txt\ndesign.pdf\nresources/design.pdf\n"
+    )
+    flags = list(section_flags(tmp_path, "demo"))
+    assert flags == [
+        "sections/demo.md:1 | commission/", "sections/demo.md:1 | owner-notes.md",
+        "sections/demo.md:2 | owner-notes.md", "sections/demo.md:3 | /sources/",
+        "sections/demo.md:4 | work\\",
+    ]

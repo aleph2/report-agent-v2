@@ -440,8 +440,9 @@ def _material_pattern(case):
     source_names = {p.name for p in (case / "sources").iterdir() if p.is_file()} if (case / "sources").is_dir() else set()
     names = {p.name for p in (case / "work").rglob("*") if p.is_file()} - source_names
     # A replay can contain copies of the original sources. Their public filenames remain valid citations.
+    names.update(p.name for p in (case / "commission").rglob("*.md") if p.is_file() and p.name not in source_names)
     options = sorted(map(re.escape, names), key=len, reverse=True)
-    terms = r"(?<![A-Za-z0-9_.-])(?:[/\\]?work[/\\])"
+    terms = r"(?<![A-Za-z0-9_.-])(?:[/\\]?(?:work|commission|sources)[/\\])"
     if options:
         terms += r"|(?<![A-Za-z0-9_.-])(?:" + "|".join(options) + r")(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])"
     return re.compile(terms)
