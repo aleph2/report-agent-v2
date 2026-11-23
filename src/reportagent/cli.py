@@ -24,7 +24,7 @@ from langsmith import tracing_context
 from . import learn
 from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
 from .budget import TokenCapMiddleware, estimate_input
-from .export.docx import clarification_numbers, export_docx
+from .export.docx import _SCENARIO, _VALUE, _risk_statements, clarification_numbers, export_docx, section_flags
 from .ingest import ingest
 from .models import PHASE_SETTINGS, make_model
 
@@ -192,6 +192,10 @@ def _revision_input(case, name, phase, prompt):
         blocks.append("Supplied section entry from /work/plan.md:\n" + entry[0].rstrip("\n") if entry
                       else f"No entry for ## {name} in /work/plan.md.")
 
+    if phase == "revise":
+        flags = list(section_flags(root, name))
+        if flags:
+            blocks.append("Internal file mentions to review for client-facing wording:\n" + "\n".join(flags))
     conflicts = {}
     labels = {}
     if phase == "clarify":
@@ -287,50 +291,6 @@ def _full_source_reads(case, name):
 
 
 # Compare written statements only. Never derive a risk grade or evaluate a scoring formula.
-_SCORE = re.compile(
-    r"(?P<baseline>(?:算术|现|当前)?基准值|(?:算术|现|当前)基准|baseline(?: score)?)\s*[:=为]?\s*(?:F\s*[:=为]\s*)?"
-    r"|(?<![A-Za-z0-9])F\s*(?:值\s*)?(?:[:=为]|is\b)\s*", re.I)
-_VALUE = re.compile(r"-?\d+(?:\.\d+)?(?![\d.]|\s*[+*/×÷~～−-])")
-_NUMBER = r"-?\d+(?:\.\d+)?"
-_CHAIN = re.compile(rf"{_NUMBER}(?:\s*[+*/×÷−-]\s*{_NUMBER})+\s*=\s*")
-_SCENARIO = (r"若|假设|区间核算|同取区间|各指标同取|计入未定项区间|(?:组合|叠加)情形"
-             r"|组合时|(?:^|(?<=[。;；:：,，]))\s*(?:敏感性(?:提示|校核|核算|分析|情形)?(?:\s*[:：]|下|时|\s+)"
-             r"|(?:单独)?改按|与[^,，。;；:：()\n]*?组合)"
-             r"|取[^,，。;；:：()\n]*?时|时\s*[,，]\s*F")
-_GRADE = r"(?P<grade>IV|III|II|I|[1-4])(?:\s*级|\b)"
-_GRADE_AFTER = re.compile(r"\s*(?:[>,≥≤<]\s*\d+(?:\.\d+)?)?[\s,，、:(]*(?:对应|为|属(?:于)?|grade\s*)?\s*" + _GRADE, re.I)
-_GRADE_ONLY = re.compile(r"(?:风险等级|基准等级|risk grade|grade)\s*[:=为]?\s*" + _GRADE, re.I)
-
-
-def _written_grade(match):
-    grade = match["grade"].upper()
-    return {"1": "I", "2": "II", "3": "III", "4": "IV"}.get(grade, grade)
-
-
-def _risk_statements(line):
-    line = unicodedata.normalize("NFKC", line)
-    covered = set()
-
-    def baseline(explicit, offset):
-        prefix = re.split(r"[。;；]", line[:offset])[-1]
-        if re.search(_SCENARIO, prefix):
-            return False
-        return True if explicit else None  # Unlabelled scores can supply a baseline if none is named.
-
-    for label in _SCORE.finditer(line):
-        chain = _CHAIN.match(line, label.end())
-        value = _VALUE.match(line, chain.end() if chain else label.end())
-        if not value:
-            continue
-        grade = _GRADE_AFTER.match(line, value.end())
-        if grade:
-            covered.add(grade.start("grade"))
-        yield baseline(label["baseline"], label.start()), Decimal(value[0]), _written_grade(grade) if grade else None
-    for grade in _GRADE_ONLY.finditer(line):
-        if grade.start("grade") not in covered:
-            yield baseline("基准" in grade[0], grade.start()), None, _written_grade(grade)
-
-
 def _score_arithmetic(path):
     lines = [unicodedata.normalize("NFKC", re.sub(r"</?su[bp]>|\*\*|\*([FRX])\*", r"\1", line)).strip()
              for line in path.read_text(encoding="utf-8-sig").splitlines()]
@@ -533,6 +493,7 @@ def check(case, name, *, output=None):
     output.parent.mkdir(parents=True, exist_ok=True)
     inventory = [f"- indicator {label} | " + ("; ".join(entries) or "(no file/page citation)") for label, entries in indicators.items()] + inventory
     comparison = _verification_comparison(case, name, section, len(inventory))
+    material_flags = list(section_flags(case, name))
     _, conflicts = clarification_numbers(case)
     duplicates = [f"duplicate clarification {number}: " + "; ".join(locations)
                   for number, locations in conflicts.items()]
@@ -541,6 +502,7 @@ def check(case, name, *, output=None):
         + "".join(line + "\n" for line in findings[:40])
         + f"\nFindings: total={len(findings)}; shown={min(40, len(findings))}; omitted={max(0, len(findings) - 40)}\n"
         + ("\n## Verification comparison\n" + "\n".join(comparison) + "\n" if comparison else "")
+        + ("\n## Internal file mentions\n" + "\n".join(material_flags) + "\n" if material_flags else "")
         + ("\n## Duplicate clarification numbers\n" + "\n".join(duplicates) + "\n" if duplicates else ""),
         encoding="utf-8",
     )

@@ -9,6 +9,8 @@ from unicodedata import east_asian_width
 from xml.etree.ElementTree import Element, SubElement, fromstring, tostring
 from zipfile import ZipFile, ZIP_DEFLATED
 import re
+import unicodedata
+from decimal import Decimal
 
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -382,6 +384,87 @@ def clarification_numbers(case, cfg=None):
     return max(locations, default=0) + 1, {n: locations[n] for n in sorted(conflicts)}
 
 
+_SCORE = re.compile(
+    r"(?P<baseline>(?:算术|现|当前)?基准值|(?:算术|现|当前)基准|baseline(?: score)?)\s*[:=为]?\s*(?:F\s*[:=为]\s*)?"
+    r"|(?<![A-Za-z0-9])F\s*(?:值\s*)?(?:[:=为]|is\b)\s*", re.I)
+_VALUE = re.compile(r"-?\d+(?:\.\d+)?(?![\d.]|\s*[+*/×÷~～−-])")
+_NUMBER = r"-?\d+(?:\.\d+)?"
+_CHAIN = re.compile(rf"{_NUMBER}(?:\s*[+*/×÷−-]\s*{_NUMBER})+\s*=\s*")
+_SCENARIO = (r"若|假设|区间核算|同取区间|各指标同取|计入未定项区间|(?:组合|叠加)情形"
+             r"|组合时|(?:^|(?<=[。;；:：,，]))\s*(?:敏感性(?:提示|校核|核算|分析|情形)?(?:\s*[:：]|下|时|\s+)"
+             r"|(?:单独)?改按|与[^,，。;；:：()\n]*?组合)"
+             r"|取[^,，。;；:：()\n]*?时|时\s*[,，]\s*F")
+_GRADE = r"(?P<grade>IV|III|II|I|[1-4])(?:\s*级|\b)"
+_GRADE_AFTER = re.compile(r"\s*(?:[>,≥≤<]\s*\d+(?:\.\d+)?)?[\s,，、:(]*(?:对应|为|属(?:于)?|grade\s*)?\s*" + _GRADE, re.I)
+_GRADE_ONLY = re.compile(r"(?:风险等级|基准等级|risk grade|grade)\s*[:=为]?\s*" + _GRADE, re.I)
+
+
+def _written_grade(match):
+    grade = match["grade"].upper()
+    return {"1": "I", "2": "II", "3": "III", "4": "IV"}.get(grade, grade)
+
+
+def _risk_statements(line):
+    line = unicodedata.normalize("NFKC", line)
+    covered = set()
+
+    def baseline(explicit, offset):
+        prefix = re.split(r"[。;；]", line[:offset])[-1]
+        if re.search(_SCENARIO, prefix):
+            return False
+        return True if explicit else None  # Unlabelled scores can supply a baseline if none is named.
+
+    for label in _SCORE.finditer(line):
+        chain = _CHAIN.match(line, label.end())
+        value = _VALUE.match(line, chain.end() if chain else label.end())
+        if not value:
+            continue
+        grade = _GRADE_AFTER.match(line, value.end())
+        if grade:
+            covered.add(grade.start("grade"))
+        yield baseline(label["baseline"], label.start()), Decimal(value[0]), _written_grade(grade) if grade else None
+    for grade in _GRADE_ONLY.finditer(line):
+        if grade.start("grade") not in covered:
+            yield baseline("基准" in grade[0], grade.start()), None, _written_grade(grade)
+
+
+def _export_scores(text):
+    yield from _risk_statements(text)
+    # Match explicitly labelled intervals as a pair, independently of the individual scenarios.
+    text = unicodedata.normalize("NFKC", text)
+    for m in re.finditer(r"(?<![A-Za-z0-9])F\s*(?:值|范围|区间)?\s*[:=为]?\s*(\d+(?:\.\d+)?)\s*[~至–—-]\s*(\d+(?:\.\d+)?)", text, re.I):
+        yield False, (Decimal(m[1]), Decimal(m[2])), None
+
+
+def _material_pattern(case):
+    source_names = {p.name for p in (case / "sources").iterdir() if p.is_file()} if (case / "sources").is_dir() else set()
+    names = {p.name for p in (case / "work").rglob("*") if p.is_file()} - source_names
+    # A replay can contain copies of the original sources. Their public filenames remain valid citations.
+    names.update(p.name for p in (case / "commission").rglob("*.md") if p.is_file() and p.name not in source_names)
+    options = sorted(map(re.escape, names), key=len, reverse=True)
+    terms = r"(?<![A-Za-z0-9_.-])(?:[/\\]?(?:work|commission|sources)[/\\])"
+    if options:
+        terms += r"|(?<![A-Za-z0-9_.-])(?:" + "|".join(options) + r")(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])"
+    return re.compile(terms)
+
+
+def section_flags(case, name, pattern=None):
+    pattern = pattern or _material_pattern(case)
+    for folder in ("sections", "clarifications"):
+        path = case / "work" / folder / (name + ".md")
+        if not path.is_file():
+            continue
+        for i, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+            for mention in dict.fromkeys(pattern.findall(line)):
+                yield f"{folder}/{name}.md:{i} | {mention}"
+
+
+def _export_flags(pattern, texts):
+    for location, text in texts:
+        for mention in dict.fromkeys(pattern.findall(text)):
+            yield f"{location} | {mention}"
+
+
 def export_docx(case_dir):
     case = Path(case_dir)
     template = case / "commission/template"
@@ -410,7 +493,16 @@ def export_docx(case_dir):
             _field(section.footer.paragraphs[0], cfg["footer_field"])
     output = case / "out"
     xlsx = output / cfg["xlsx_file"]
-    answers, records = _old_answers(xlsx, cfg), []
+    registers = case / "work/question-registers"
+    destinations = {"client": xlsx, "method": registers / "chapter-03-method.xlsx",
+                    "internal": registers / "internal.xlsx", "unclassified": registers / "unclassified.xlsx"}
+    answers = {}
+    # Keep one recoverable answer snapshot if a workbook is locked midway through audience changes.
+    snapshot = registers / "answers.xlsx"
+    for target in (snapshot, destinations["method"], destinations["internal"], destinations["unclassified"], xlsx):
+        answers.update(_old_answers(target, cfg))
+    records, scores, flags = [], {}, []
+    pattern = _material_pattern(case)
     replies = case / cfg["answers_file"] if cfg["answers_file"] else None
     if replies and replies.exists():
         for number, answer in re.findall(r"(?m)^(\d+):[ \t]*(.+)$", replies.read_text(encoding="utf-8-sig")):
@@ -425,6 +517,10 @@ def export_docx(case_dir):
             paragraphs = [heading]
             if i + 1 == len(order) or order[i + 1][0] <= level:
                 document.add_paragraph(cfg["placeholder"], cfg["body_style"])
+        scores[name] = [entry for para in paragraphs for entry in _export_scores(para.text)]
+        if path.is_file():
+            flags.extend(_export_flags(pattern, ((f"Section {name}:{n}", line) for n, line in
+                                                  enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1))))
         items = case / "work/clarifications" / (name + ".md")
         if not items.exists():
             continue
@@ -433,21 +529,63 @@ def export_docx(case_dir):
             if not item:
                 continue
             number = int(item["number"])
-            anchor, position = _anchor(paragraphs, item["anchor"], heading)
-            text = cfg["item_prefix"] + str(number) + "\n" + item["content"]
-            if item.get("sources"):
-                text += "\n" + cfg["citation_prefix"] + item["sources"]
-            document.add_comment(anchor, text, author=cfg["comment_author"])
+            audience = item.get("audience")
+            if audience not in ("client", "method", "internal"):
+                audience = "unclassified"
+                flags.append(f"{name} | question {number} | audience unclassified")
+            position = item.get("anchor", "")
+            if audience == "client":
+                anchor, position = _anchor(paragraphs, item["anchor"], heading)
+                text = cfg["item_prefix"] + str(number) + "\n" + item["content"]
+                if item.get("sources"):
+                    text += "\n" + cfg["citation_prefix"] + item["sources"]
+                document.add_comment(anchor, text, author=cfg["comment_author"])
             status, answer, responder = answers.get(number, [cfg["item_status"], "", ""])
             status = item.get("status", status)
             if number in conflicts:
                 status, answer, responder = cfg["item_conflict_status"], "", ""
-            records.append(dict(item, number=number, section=heading.text, position=position, status=status, answer=answer, responder=responder))
+            records.append(dict(item, number=number, audience=audience, section_id=name, section=heading.text, position=position, status=status, answer=answer, responder=responder))
     output.mkdir(parents=True, exist_ok=True)
     target = output / cfg["docx_file"]
     document.save(target)
     if cfg["sheet_sort"]:
         records.sort(key=lambda item: float(item.get(cfg["sheet_sort"]) or cfg["sheet_sort_default"]))
-    rows = [[item.get(field, "") for field in cfg["sheet_fields"].split("|")] for item in records]
-    _xlsx(xlsx, cfg["sheet_columns"].split("|"), rows, cfg)
+    fields = cfg["sheet_fields"].split("|")
+    if any(answer or responder or status != cfg["item_status"] for status, answer, responder in answers.values()):
+        registers.mkdir(parents=True, exist_ok=True)
+        saved = [dict(number=n, status=status, answer=answer, responder=responder)
+                 for n, (status, answer, responder) in answers.items()]
+        _xlsx(snapshot, cfg["sheet_columns"].split("|"), [[item.get(key, "") for key in fields] for item in saved], cfg)
+    for audience, destination in destinations.items():
+        selected = [item for item in records if item["audience"] == audience]
+        if not selected and audience != "client" and not destination.exists():
+            continue
+        rows = [[item.get(field, "") for field in fields] for item in selected]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _xlsx(destination, cfg["sheet_columns"].split("|"), rows, cfg)
+        if audience == "client":
+            for row, (values, item) in enumerate(zip(rows, selected), 2):
+                for col, text in enumerate(values):
+                    cell = f"Excel {xlsx.name}!{chr(65 + col)}{row} (Q{item['number']})"
+                    flags.extend(_export_flags(pattern, [(cell, str(text))]))
+                    if fields[col] in ("answer", "responder", "sources", "status"):
+                        continue
+                    for baseline, score, grade in _export_scores(str(text)):
+                        candidates = scores[item["section_id"]]
+                        if baseline is True:
+                            explicit = [entry for entry in candidates if entry[0] is True]
+                            candidates = explicit or [entry for entry in candidates if entry[0] is None]
+                        if not any((score is None or score == s) and (grade is None or grade == g)
+                                   for _, s, g in candidates):
+                            flags.append(f"{cell} | F/grade {score}/{grade} has no matching value in Word section {item['section_id']}")
+    with ZipFile(target) as doc:
+        for part in doc.namelist():
+            if re.fullmatch(r"word/(?:document|comments|header\d+|footer\d+|footnotes|endnotes)\.xml", part):
+                paras = fromstring(doc.read(part)).iter(qn("w:p"))
+                flags.extend(_export_flags(pattern, ((f"Word {part} paragraph {n}", "".join(t.text or "" for t in para.iter(qn("w:t"))))
+                                                      for n, para in enumerate(paras, 1))))
+    status = "NOT CLIENT-READY" if flags else "No outstanding mechanical client-readiness flags"
+    (output / "client-readiness.txt").write_text("\n".join([status, *flags]) + "\n", encoding="utf-8")
+    if flags:
+        print(f"{status} | {output / 'client-readiness.txt'}")
     return target

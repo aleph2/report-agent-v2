@@ -30,3 +30,4 @@ If no notes file exists, write the section with every required item marked missi
 After saving, reply in one line with the saved paths.
 
 In the revise phase, use calculate_score for every F, range endpoint and scenario figure written in the text.
+Review supplied internal-file mentions and replace internal references in client-facing wording with the underlying engineering evidence or an explicit evidence gap.

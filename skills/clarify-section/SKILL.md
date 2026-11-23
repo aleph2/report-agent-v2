@@ -13,3 +13,4 @@ Also fill object: (the client's item name), question: (one direct question), req
 Save the complete file at the official clarification path in the assignment, retaining every existing item and its number except an evidenced collision renumbering. Incorporate supported pending items here.
 
 In the clarify phase, use calculate_score for every F, range endpoint and scenario figure written in the text.
+Record audience: client, method, or internal on every item. Use client for questions only the client can settle, method for guide or chapter 03 interpretation, and internal for the report team. Keep existing IDs and answers.
