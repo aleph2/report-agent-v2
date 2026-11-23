@@ -124,7 +124,7 @@ def _table(document, rows, alignment, cfg):
     for column, width in zip(table.columns, _column_widths(document, rows, cfg)):
         column.width = width
     borders = OxmlElement("w:tblBorders")
-    for edge in ("top", "left", "bottom", "right"):
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
         border = OxmlElement("w:" + edge)
         border.set(qn("w:val"), cfg["table_border"])
         border.set(qn("w:sz"), cfg["table_border_size"])
@@ -168,6 +168,30 @@ def _field(paragraph, instruction):
             code.set(qn("xml:space"), "preserve")
             code.text = " " + instruction + " "
             paragraph.add_run()._r.append(code)
+
+
+def _contents(document, page_break, levels):
+    entry = page_break.insert_paragraph_before()
+    _field(entry, f'TOC \\o "{levels}" \\h \\z \\u')
+    bounds = re.fullmatch(r"([1-9])(?:-([1-9]))?", levels.strip())
+    if not bounds:
+        return
+    # Keep the visible entries inside one refreshable Word field.
+    end = entry.runs[-1]._r
+    for p in document.paragraphs:
+        heading = re.fullmatch(r"Heading ([1-9])", p.style.name)
+        if not heading or not bounds[1] <= heading[1] <= (bounds[2] or bounds[1]) or not p.text:
+            continue
+        if entry.text:
+            entry = page_break.insert_paragraph_before()
+        style = "TOC " + heading[1]
+        if style in document.styles:
+            entry.style = style
+        else:
+            entry.paragraph_format.left_indent = Pt(12 * (int(heading[1]) - 1))
+            entry.paragraph_format.first_line_indent = Pt(0)
+        entry.add_run(p.text)
+    entry._p.append(end)
 
 
 def _fields(text):
@@ -475,6 +499,7 @@ def export_docx(case_dir):
     data = reference.read_bytes() if reference.exists() else package.joinpath("reference.docx").read_bytes()
     document = Document(BytesIO(data))
     metadata, order = _plan(case)
+    toc_break = None
     if metadata:
         if metadata.get("project"):
             document.add_paragraph(metadata["project"], "Subtitle")
@@ -482,8 +507,7 @@ def export_docx(case_dir):
             document.add_paragraph(metadata["title"], "Title")
         if cfg["toc_title"]:
             document.add_paragraph(cfg["toc_title"], cfg["toc_style"])
-            _field(document.add_paragraph(), 'TOC \\o "' + cfg["toc_levels"] + '" \\h \\z \\u')
-            document.add_page_break()
+            toc_break = document.add_page_break()
     for section in document.sections:
         for part in (section.header, section.footer):
             for node in part._element.iter(qn("w:t")):
@@ -547,6 +571,8 @@ def export_docx(case_dir):
             records.append(dict(item, number=number, audience=audience, section_id=name, section=heading.text, position=position, status=status, answer=answer, responder=responder))
     output.mkdir(parents=True, exist_ok=True)
     target = output / cfg["docx_file"]
+    if toc_break is not None:
+        _contents(document, toc_break, cfg["toc_levels"])
     document.save(target)
     if cfg["sheet_sort"]:
         records.sort(key=lambda item: float(item.get(cfg["sheet_sort"]) or cfg["sheet_sort_default"]))
