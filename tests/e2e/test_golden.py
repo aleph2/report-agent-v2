@@ -122,3 +122,30 @@ def test_readiness_flags_case_paths_and_commission_markdown(tmp_path):
         "sections/demo.md:2 | owner-notes.md", "sections/demo.md:3 | /sources/",
         "sections/demo.md:4 | work\\",
     ]
+
+
+def test_contents_has_visible_headings_and_tables_have_inner_borders(tmp_path):
+    from docx.oxml.ns import qn
+
+    work = tmp_path / "work"
+    sections = work / "sections"
+    sections.mkdir(parents=True)
+    (work / "plan.md").write_text("---\ntitle: Example\nsection: 1|one\nsection: 2|missing\n---\n")
+    (sections / "one.md").write_text(
+        "# Actual title\n\n## Subheading\n\n#### Below TOC depth\n\n"
+        "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    )
+    doc = Document(export_docx(tmp_path))
+    before_break = []
+    for p in doc.paragraphs:
+        if p._p.xpath(".//w:br[@w:type='page']"):
+            break
+        before_break.append(p)
+    start = next(i for i, p in enumerate(before_break) if p._p.xpath(".//w:instrText[contains(., 'TOC ')]"))
+    entries = before_break[start:]
+    assert [p.text for p in entries] == ["Actual title", "Subheading", "missing"]
+    assert entries[0]._p.xpath(".//w:fldChar[@w:fldCharType='separate']")
+    assert entries[-1]._p.xpath(".//w:fldChar[@w:fldCharType='end']")
+    borders = doc.tables[0]._tbl.tblPr.find(qn("w:tblBorders"))
+    for edge in ("insideH", "insideV"):
+        assert borders.find(qn("w:" + edge)).attrib == borders.find(qn("w:top")).attrib
