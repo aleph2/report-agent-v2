@@ -2,12 +2,14 @@ from base64 import b64decode
 from io import BytesIO
 import json
 import math
+from pathlib import PurePosixPath
 from typing import NotRequired
 
+import pypdfium2 as pdfium
 from PIL import Image
 
 from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from .models import PHASE_SETTINGS
@@ -83,10 +85,14 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
                 log.write(json.dumps(dict(request=self.request_number, **fields)) + "\n")
 
     def _prepare(self, request):
+        # Price the usual tool set conservatively even when the final request offers only a save.
+        tools = request.tools
+        if request.state.get("final_save_rule"):
+            save = "edit_file" if self.phase == "revise" else "write_file"
+            request = request.override(tools=[tool for tool in request.tools if getattr(tool, "name", None) == save])
         if not (self.info or self.guard):
             return request
         messages = ([request.system_message] if request.system_message else []) + request.messages
-        tools = request.tools
         prompt = (messages, tools, request.model)
         base, chars_per_token = 0, 1.5
         if self._anchor is not None:
@@ -118,6 +124,41 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         prepared = self._prepare(request)
         return prepared if isinstance(prepared, AIMessage) else await handler(prepared)
 
+    def _limit_read(self, request, result):
+        if (not self.guard or request.tool_call["name"] != "read_file"
+                or not isinstance(result, ToolMessage) or result.status == "error"):
+            return result
+        remaining = max(0, self.max_tokens - request.state.get("total_tokens", 0) - self.output_reserve)
+        model = self._pending[2] if self._pending else None
+        estimate = estimate_input([result], None, model, chars_per_token=1.25)
+        if estimate <= remaining:
+            return result
+        path = PurePosixPath(request.tool_call["args"]["file_path"])
+        pages = "page count unavailable"
+        hint = "Read a smaller line range with offset and limit."
+        if isinstance(result.content, list):
+            hint = "Use /index.md to select a smaller source or page."
+            for block in result.content:
+                if isinstance(block, dict) and block.get("mime_type") == "application/pdf":
+                    try:
+                        with pdfium.PdfDocument(b64decode(block["base64"])) as pdf:
+                            pages = f"{len(pdf)} pages" if len(pdf) != 1 else "1 page"
+                    except (pdfium.PdfiumError, ValueError):
+                        pass
+                    hint = (f"Request specific pages or a page range by reading their indexed page files, "
+                            f"such as {path.with_suffix('')}/page-001.txt (or .png). See /index.md.")
+                    break
+        notice = f"{path}: {pages}, estimated {estimate} input tokens; {remaining} available for a read. {hint}"
+        smaller = ToolMessage(content=notice, tool_call_id=result.tool_call_id, name=result.name)
+        # A shorter native result is better than the notice, even after the allowance runs out.
+        return smaller if estimate_input([smaller], None, model, 1.25) < estimate else result
+
+    def wrap_tool_call(self, request, handler):
+        return self._limit_read(request, handler(request))
+
+    async def awrap_tool_call(self, request, handler):
+        return self._limit_read(request, await handler(request))
+
     def _end(self, total, rule="reported total >= cap"):
         return {"total_tokens": total, "jump_to": "end", "messages": [
             AIMessage(content=f"Token cap reached: cap={self.max_tokens}; reported total={total}. "
@@ -147,7 +188,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
             if self.info:
                 save += f" Remaining allowance: {self.max_tokens - total} tokens."
             return {"final_save_rule": "remaining < 2 * (previous input + output reserve)", "messages": [HumanMessage(
-                content="Token budget reached. " + save
+                content="This is the last response this phase can make; save your file now. " + save
             )]}
         # Keep pending tool calls and their results together before adding the note.
         if self.remind and total >= self.max_tokens / 2 and not state.get("budget_note_sent"):

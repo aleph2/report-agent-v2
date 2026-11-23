@@ -7,7 +7,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from pathlib import Path
 from shutil import copytree
 from tempfile import TemporaryDirectory, mkdtemp
@@ -22,7 +22,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langsmith import tracing_context
 
 from . import learn
-from .agent import PHASE_SKILLS, build_agent
+from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
 from .budget import TokenCapMiddleware, estimate_input
 from .export.docx import _SCENARIO, _VALUE, _risk_statements, clarification_numbers, export_docx, section_flags
 from .ingest import ingest
@@ -108,6 +108,7 @@ def _verification_input(case, name, top):
 
     # Bound initial request size; remaining pages are available to read_file.
     available_bytes = 8 * 1024 * 1024
+    supplied = []
     attached = 0
     for (pdf, start), filename in pages.items():
         if attached == 10:
@@ -135,12 +136,13 @@ def _verification_input(case, name, top):
                     image = base64.b64encode(page.read_bytes()).decode("ascii")
                     blocks.extend([{"type": "text", "text": label},
                                    {"type": "image", "mime_type": "image/png", "base64": image}])
+                supplied.append(page.relative_to(root).as_posix())
                 available_bytes -= size
             except (OSError, UnicodeError) as error:
                 blocks.append({"type": "text", "text": f"{label} unavailable ({type(error).__name__})"})
         attached += len(blocks) > before
 
-    return HumanMessage(content=blocks if len(blocks) > 1 else numbered)
+    return HumanMessage(content=blocks if len(blocks) > 1 else numbered, response_metadata={"supplied_files": supplied})
 
 
 def _revision_messages(case, name, phase, prompt=None):
@@ -160,7 +162,7 @@ def _revision_messages(case, name, phase, prompt=None):
         top = text.partition("\n## Findings")[0]
         message = _verification_input(case, name, top)
         if top == text:
-            message.response_metadata["supplied_files"] = [checklist]
+            message.response_metadata["supplied_files"].insert(0, checklist)
         return [message, HumanMessage(content=prompt)]
     return [_revision_input(case, name, phase, prompt)]
 
@@ -322,9 +324,8 @@ def _score_arithmetic(path):
         if start is not None:
             yield f"{path.stem} line {start + 1}: score arithmetic unavailable; no indicator rows"
         return
-    # Table 3-3 grades use strict lower bounds. Decimal half-up displays the reported precision.
-    grade = "IV" if total > 60 else "III" if total > 45 else "II" if total > 30 else "I"
-    display = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    result = score_result(total)
+    grade, display = result["grade"], result["F"]
     baseline = True
     compared = False
     continuation = False
@@ -523,7 +524,8 @@ def _preflight(case, section, phase, messages, cap):
         affordable = max(0, (cap - reserve + expected) // (first + expected))
         conservative = max(0, cap // (first + reserve))
         print(f"phase={phase} cap={cap} estimated_first_input={first} output_reserve={reserve} "
-              f"expected_output={expected} affordable_requests={affordable} conservative_requests={conservative}")
+              f"expected_output={expected} affordable_requests={affordable} conservative_requests={conservative} "
+              f"conservative_floor_3={3 * (first + reserve)}")
         if conservative < 2:
             print(f"{phase}: conservative estimate affords fewer than 2 requests.")
         return AIMessage(content="Preflight complete.")
@@ -832,6 +834,11 @@ def _execute(args, parser, receipt):
             limit = min(limit, phase_caps[phase])
         messages = (_revision_messages(args.case, args.section, phase, prompt) if phase in REVISION_CAPS
                     else [HumanMessage(content=prompt)])
+        first = messages[0]
+        if supplied := first.response_metadata.get("supplied_files"):
+            notice = supplied_notice(supplied)
+            first.content = ([{"type": "text", "text": notice}, *first.content] if isinstance(first.content, list)
+                             else notice + "\n\n" + first.content)
         if preflight:
             _preflight(args.case, args.section, phase, messages, limit)
             continue

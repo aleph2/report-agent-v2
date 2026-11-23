@@ -73,7 +73,7 @@ def test_final_save_turn(tmp_path, costs, limit, calls, used, saved, writing):
     cap.output_reserve = 1  # One token reserved for the scripted write.
     result = build_agent(tmp_path, model, middleware=[cap]).invoke({"messages": [("user", "Read the case.")]})
     assert model.i == calls and result["total_tokens"] == used
-    notes = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.text == "Token budget reached. Save your work now in one write; do not read anything more."]
+    notes = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.text == "This is the last response this phase can make; save your file now. Save your work now in one write; do not read anything more."]
     assert len(notes) == int(saved) and (tmp_path / "saved.md").exists() is (saved and writing)
     if saved:
         if writing:
@@ -148,7 +148,8 @@ def test_preflight_budget_at_provider_boundary(tmp_path, monkeypatch, info, guar
         assert entries[-1]["decision"] == "stop" and "cap" in result["messages"][-1].text.lower()
     else:
         assert len(payloads) == 2 and result["total_tokens"] == 59_010
-        assert "1000" in payloads[-1]["messages"][-1]["content"].replace(",", "")
+        assert payloads[-1]["messages"][-1]["content"].endswith("Remaining allowance: 1000 tokens.")
+        assert [t["function"]["name"] for t in payloads[-1]["tools"]] == ["edit_file"]
 
 
 @pytest.mark.parametrize("words", [10, 3000])
@@ -246,3 +247,47 @@ def test_unavailable_image_uses_detail_ceiling():
     remote = {"type": "image_url", "image_url": {"url": "https://example.invalid/page.png", "detail": "low"}}
     assert _image_tokens(remote, 32) == 2562
     assert _image_tokens({"type": "image", "base64": "invalid"}, 32) == 16386
+
+
+@pytest.mark.parametrize("phase", [None, "verify-sources", "review", "revise", "clarify"])
+def test_oversized_pdf_returns_page_route_and_allows_next_read(tmp_path, phase):
+    from pathlib import Path
+
+    sources = tmp_path / "sources"
+    pages = sources / "guide"
+    pages.mkdir(parents=True)
+    fixture = Path(__file__).parents[1] / "fixtures/one-page.pdf"
+    (sources / "guide.pdf").write_bytes(fixture.read_bytes().replace(b"%%EOF", b"%" + b"0" * 160000 + b"\n%%EOF"))
+    (pages / "page-001.txt").write_text("Evidence from page one.")
+    model = ScriptedModel(responses=[
+        call("read_file", file_path="/sources/guide.pdf"),
+        call("read_file", file_path="/sources/guide/page-001.txt"),
+        AIMessage(content="Finished."),
+    ])
+    cap = TokenCapMiddleware(100000, phase=phase, guard=True)
+    state = build_agent(tmp_path, model, phase=phase, middleware=[cap]).invoke({"messages": [("user", "Read the guide.")]})
+    results = [msg for msg in state["messages"] if msg.type == "tool"]
+    assert len(results) == 2 and state["messages"][-1].text.startswith("Finished.")
+    notice = results[0].content
+    assert isinstance(notice, str) and len(notice) < 600
+    assert all(word in notice for word in ("/sources/guide.pdf", "1 page", "tokens", "/sources/guide/page-001.txt"))
+    assert "Evidence from page one." in results[1].content
+
+
+def test_async_read_retries_a_text_file_with_a_line_window(tmp_path):
+    import asyncio
+
+    folder = tmp_path / "sources"
+    folder.mkdir()
+    (folder / "record.txt").write_text(("field observation " * 10 + "\n") * 500)
+    model = ScriptedModel(responses=[
+        call("read_file", file_path="/sources/record.txt"),
+        call("read_file", file_path="/sources/record.txt", offset=1, limit=1),
+        AIMessage(content="Done."),
+    ])
+    cap = TokenCapMiddleware(30000, phase="clarify", guard=True)
+    graph = build_agent(tmp_path, model, phase="clarify", middleware=[cap])
+    state = asyncio.run(graph.ainvoke({"messages": [("user", "Read one observation.")]}))
+    full, window = [m.content for m in state["messages"] if m.type == "tool"]
+    assert "estimated" in full and "offset" in full and "limit" in full
+    assert "field observation" in window and "field observation" not in full
