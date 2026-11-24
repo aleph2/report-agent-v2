@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Report Agent · Case workspace</title>
+    <title>报告助手 · 案件工作区</title>
     <style>
       :root {
         color-scheme: light;
@@ -15,6 +15,7 @@
         font:
           15px/1.45 Inter,
           'Segoe UI',
+          'Microsoft YaHei',
           Arial,
           sans-serif;
         color: var(--ink);
@@ -201,6 +202,19 @@
         align-items: center;
         gap: 12px;
       }
+      #guide {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 10px;
+        list-style: none;
+        padding: 0;
+        margin: 0 0 22px;
+        color: var(--sub);
+        font-size: 14px;
+      }
+      #guide li { padding: 5px 8px; }
+      #guide li[aria-current="step"] { background: var(--teal); color: white; border-radius: 4px; font-weight: 650; }
+      .card-head { flex-wrap: wrap; }
       .title-row {
         justify-content: space-between;
         margin-bottom: 23px;
@@ -373,7 +387,11 @@
         font-size: 12px;
         padding: 6px 10px;
       }
-      input::file-selector-button {
+      .picker { position: relative; display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+      .picker:focus-within { outline: 2px solid var(--teal); }
+      .picker input { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; }
+      .picker output { color: var(--sub); font-size: 13px; overflow-wrap: anywhere; }
+      .picker span { flex: none;
         border: 1px solid #c4d1c8;
         border-radius: 4px;
         background: #f1f5ef;
@@ -565,51 +583,56 @@
   <body>
     <div class="shell">
       <aside>
-        <div class="brand"><span class="mark" aria-hidden="true">R</span> Report Agent</div>
+        <div class="brand"><span class="mark" aria-hidden="true">R</span> 报告助手</div>
         <div class="rail-head">
-          <h2>Cases</h2>
-          <button id="add" type="button">+ New case</button>
+          <h2>案件</h2>
+          <button id="add" type="button">+ 新建案件</button>
         </div>
-        <nav class="rail-list" id="cases" aria-label="Cases"></nav>
-        <div class="rail-foot"><i class="dot"></i> Local workspace</div>
+        <nav class="rail-list" id="cases" aria-label="案件"></nav>
+        <div class="rail-foot"><i class="dot"></i> 本机工作区</div>
       </aside>
       <main>
-        <div class="crumb">Workspace <span>/</span> Cases</div>
+        <div class="crumb">工作区 <span>/</span> 案件</div>
         <p class="notice" id="notice" role="status"></p>
         <section id="welcome" class="welcome" hidden>
-          <h1>Case workspace</h1>
-          <p>Create a case to upload a commission and source files.</p>
-          <button id="first" class="primary">New case</button>
+          <h1>案件工作区</h1>
+          <p>新建案件后可上传委托资料和源资料。</p>
+          <button id="first" class="primary">新建案件</button>
         </section>
         <div id="detail" hidden>
           <header class="title-row">
             <h1 id="name"></h1>
             <span class="status"><i class="dot" id="dot"></i><span id="status"></span></span>
           </header>
+          <ol id="guide" aria-label="案件办理步骤">
+            <li>① 上传资料</li><li>② 运行第一阶段</li><li>③ 下载初稿与清单发给客户</li>
+            <li>④ 上传客户答复</li><li>⑤ 运行第二阶段</li><li>⑥ 下载终稿</li>
+          </ol>
           <div class="metrics">
             <div class="metric">
-              <span class="label">Tokens this run</span><strong class="value" id="tokens"></strong>
+              <span class="label">本次 token</span><strong class="value" id="tokens"></strong>
             </div>
             <div class="metric">
-              <span class="label">Case total tokens</span><strong class="value" id="caseTokens"></strong>
+              <span class="label">案件累计 token</span><strong class="value" id="caseTokens"></strong>
             </div>
             <div class="metric">
-              <span class="label">Last progress</span><strong class="last" id="last"></strong>
+              <span class="label">最近进展</span><strong class="last" id="last"></strong>
             </div>
           </div>
-          <button class="primary" type="button" id="resumeUploads" hidden>Resume uploads</button>
+          <button class="primary" type="button" id="resumeUploads" hidden>继续上传</button>
           <div class="grid">
             <section class="card">
               <div class="card-head">
-                <h2>Run controls</h2>
-                <div class="switch" aria-label="Stage">
-                  <button type="button" id="stage1" aria-pressed="true">Stage 1</button
-                  ><button type="button" id="stage2" aria-pressed="false">Stage 2</button>
+                <h2>运行设置</h2>
+                <div class="switch" aria-label="选择运行阶段">
+                  <button type="button" id="stage1" aria-pressed="true">第一阶段</button
+                  ><button type="button" id="stage2" aria-pressed="false">第二阶段</button>
                 </div>
               </div>
+              <p class="hint" id="stageDescription">第一阶段：初稿与待澄清清单</p>
               <form id="runform">
                 <div class="field">
-                  <label for="cap">Maximum tokens</label
+                  <label for="cap">最大 token 数</label
                   ><input
                     id="cap"
                     name="max_tokens"
@@ -617,27 +640,27 @@
                     min="0"
                     step="1"
                     required
-                    placeholder="Enter a run limit"
+                    placeholder="请输入本次运行的 token 上限"
                   />
                 </div>
                 <div class="field">
-                  <label for="caps">Phase caps <span class="optional">· optional, one per line</span></label
+                  <label for="caps">分阶段上限 <span class="optional">（可选，每行一项）</span></label
                   ><textarea id="caps" name="phase_caps" placeholder="clarify=60000"></textarea>
                 </div>
                 <div class="actions">
-                  <button class="primary" id="start">Run stage 1</button
-                  ><button type="button" id="stop" hidden>Stop stage</button>
+                  <button class="primary" id="start">运行第一阶段</button
+                  ><button type="button" id="stop" hidden>停止运行</button>
                 </div>
               </form>
             </section>
             <section class="card">
-              <div class="card-head"><h2>Case files</h2></div>
+              <div class="card-head"><h2>案件文件</h2></div>
               <div id="files"></div>
               <form class="answer-form" id="answers">
-                <label for="sheet">Answered client sheet</label>
+                <label for="sheet">上传已答复的客户清单</label>
                 <div class="upload-row">
-                  <input id="sheet" name="sheet" type="file" accept=".xlsx" required /><button id="upload">
-                    Upload
+                  <div class="picker"><span>选择文件</span><output>未选择文件</output><input id="sheet" name="sheet" type="file" accept=".xlsx" required /></div><button id="upload">
+                    上传
                   </button>
                 </div>
               </form>
@@ -645,28 +668,28 @@
           </div>
           <section class="card progress">
             <div class="progress-head">
-              <h2>Run progress</h2>
+              <h2>运行进度</h2>
               <span id="progressState" class="hint"></span>
             </div>
             <div id="startingCaps" class="caps" hidden></div>
-            <div id="progressEmpty" class="empty">Progress appears when a stage starts.</div>
+            <div id="progressEmpty" class="empty">运行阶段启动后，这里会显示进度。</div>
             <div class="scroll">
               <table id="progressTable" hidden>
                 <thead>
                   <tr>
-                    <th>Time (local)</th>
-                    <th>Section</th>
-                    <th>Phase</th>
-                    <th>Tokens used</th>
-                    <th>Running total</th>
-                    <th>Status</th>
+                    <th>本地时间</th>
+                    <th>章节</th>
+                    <th>环节</th>
+                    <th>本环节 token</th>
+                    <th>本次累计 token</th>
+                    <th>状态</th>
                   </tr>
                 </thead>
                 <tbody id="rows"></tbody>
               </table>
             </div>
             <details class="logs" id="logBox">
-              <summary>Stage logs</summary>
+              <summary>阶段日志</summary>
               <div class="file-list" id="logs"></div>
             </details>
           </section>
@@ -675,25 +698,25 @@
     </div>
     <dialog id="newcase">
       <form id="create">
-        <h2 id="createTitle">New case</h2>
+        <h2 id="createTitle">新建案件</h2>
         <p class="notice" id="createError" role="status"></p>
         <div class="field">
-          <label for="caseName">Case name</label><input id="caseName" name="case" required />
+          <label for="caseName">案件名称</label><input id="caseName" name="case" required />
         </div>
         <div class="field">
-          <label for="commission">Commission files</label
-          ><input type="file" id="commission" name="commission" multiple />
+          <label for="commission">委托资料</label
+          ><div class="picker"><span>选择文件</span><output>未选择文件</output><input type="file" id="commission" name="commission" multiple /></div>
         </div>
         <div class="field">
-          <label for="sources">Source files</label><input type="file" id="sources" name="sources" multiple />
+          <label for="sources">源资料</label><div class="picker"><span>选择文件</span><output>未选择文件</output><input type="file" id="sources" name="sources" multiple /></div>
         </div>
         <div id="fileTransfer" hidden aria-live="polite">
           <strong id="fileStep"></strong><span id="fileName"></span>
-          <progress id="fileBar" max="1" value="0" aria-label="Current file upload"></progress>
+          <progress id="fileBar" max="1" value="0" aria-label="当前文件上传进度"></progress>
         </div>
         <div class="actions">
-          <button id="cancel" type="button">Cancel</button
-          ><button class="primary" id="createSubmit">Create case</button>
+          <button id="cancel" type="button">取消</button
+          ><button class="primary" id="createSubmit">创建案件</button>
         </div>
       </form>
     </dialog>
@@ -706,10 +729,20 @@
         if (cls) n.className = cls
         return n
       }
-      const fmt = (n) => Number(n || 0).toLocaleString()
+      const fmt = (n) => Number(n || 0).toLocaleString('zh-CN')
       const when = (s) =>
-        new Date(s).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      const stageLabel = (s) => (s === 'stage1' ? 'Stage 1' : s === 'stage2' ? 'Stage 2' : s)
+        new Date(s).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      const stageLabel = (s) => (s === 'stage1' ? '第一阶段' : s === 'stage2' ? '第二阶段' : s)
+      const phases = { ingest: '整理资料', plan: '制定计划', gather: '收集依据', write: '撰写初稿',
+        'verify-sources': '核实引文', review: '复核', clarify: '整理待澄清问题', revise: '修订', export: '导出成果' }
+      const phaseName = (key) => phases[key] || stageLabel(key)
+      const statusName = (key) => ({ start: '已启动', done: '已完成', unfinished: '未完成' })[key] || key
+      const capText = (text) => text.split(' ').map((item) => {
+        const [key, value] = item.split('=')
+        return (key === 'max-tokens' ? '总上限' : phaseName(key)) + ' ' + fmt(value)
+      }).join(' · ')
+      const errorText = (err) => /[一-龥]/.test(err.message) ? err.message : '请求失败，请检查本机服务后重试。'
+      let lastGuide = ''
       let selected = new URLSearchParams(location.search).get('case'),
         stage = 'stage1',
         serial = 0,
@@ -725,14 +758,16 @@
         return data
       }
       function summary(row) {
-        return [when(row[0]), row[1] === '-' ? '' : row[1], stageLabel(row[2]), row[5]]
+        return [when(row[0]), row[1] === '-' ? '' : row[1], phaseName(row[2]), statusName(row[5])]
           .filter(Boolean)
           .join(' · ')
       }
       function setStage(s) {
+        if (stage !== s) el('caps').value = ''
         stage = s
         for (const id of ['stage1', 'stage2']) el(id).setAttribute('aria-pressed', String(id === s))
-        el('start').textContent = 'Run ' + stageLabel(s).toLowerCase()
+        el('start').textContent = '运行' + stageLabel(s)
+        el('stageDescription').textContent = s === 'stage1' ? '第一阶段：初稿与待澄清清单' : '第二阶段：终稿'
         el('caps').placeholder = s === 'stage1' ? 'clarify=60000' : 'revise=220000'
       }
       function choose(name) {
@@ -740,7 +775,7 @@
         el('runform').reset()
         el('answers').reset()
         el('notice').textContent = ''
-        setStage('stage1')
+        lastGuide = ''
         const url = new URL(location)
         url.searchParams.set('case', name)
         history.replaceState(null, '', url)
@@ -757,45 +792,54 @@
       }
       function render(data) {
         el('name').textContent = data.name
+        Array.from(el('guide').children).forEach((item, index) => {
+          if (index + 1 === data.step) item.setAttribute('aria-current', 'step')
+          else item.removeAttribute('aria-current')
+        })
+        const guide = data.name + '/' + data.step
+        if (lastGuide !== guide) {
+          setStage(data.step >= 5 ? 'stage2' : 'stage1')
+          lastGuide = guide
+        }
         el('status').textContent = !data.ready
-          ? 'Uploads pending'
+          ? '待上传'
           : data.running
-            ? stageLabel(data.running) + ' running'
-            : 'Idle'
+            ? stageLabel(data.running) + '运行中'
+            : '空闲'
         el('resumeUploads').hidden = data.ready
         el('caseTokens').textContent = fmt(data.case_tokens)
         el('dot').classList.toggle('on', !!data.running)
         el('tokens').textContent = fmt(data.last[4])
-        el('last').textContent = data.last.length ? summary(data.last) : 'No runs yet'
+        el('last').textContent = data.last.length ? summary(data.last) : '暂无运行记录'
         el('start').disabled = !data.ready || !!data.running || busy
         el('stop').hidden = !data.running
         el('upload').disabled = !data.ready || !!data.running
         el('files').replaceChildren()
         for (const [group, title] of [
-          ['out', 'Outputs'],
-          ['registers', 'Question registers'],
+          ['out', '成果文件'],
+          ['registers', '问题登记表'],
         ]) {
           const box = node('div', '', 'files-group')
           box.append(node('h3', title))
           const list = node('div', '', 'file-list')
           links(list, data.files[group], group)
-          if (!list.children.length) list.append(node('span', 'No files yet', 'empty'))
+          if (!list.children.length) list.append(node('span', '暂无文件', 'empty'))
           box.append(list)
           el('files').append(box)
         }
         const start = data.rows.filter((row) => row[5] === 'start').at(-1)
         el('startingCaps').hidden = !start
-        el('startingCaps').textContent = start ? stageLabel(start[2]) + ' · ' + start[6] : ''
+        el('startingCaps').textContent = start ? stageLabel(start[2]) + ' · ' + capText(start[6]) : ''
         el('rows').replaceChildren()
         for (const row of data.rows.slice().reverse()) {
           const tr = document.createElement('tr')
-          for (const t of [when(row[0]), row[1], stageLabel(row[2]), fmt(row[3]), fmt(row[4]), row[5]])
+          for (const t of [when(row[0]), row[1], phaseName(row[2]), fmt(row[3]), fmt(row[4]), statusName(row[5])])
             tr.append(node('td', t))
           el('rows').append(tr)
         }
         el('progressTable').hidden = !data.rows.length
         el('progressEmpty').hidden = !!data.rows.length
-        el('progressState').textContent = data.running ? 'Refreshing every 3 seconds' : ''
+        el('progressState').textContent = data.running ? '每 3 秒刷新' : ''
         links(el('logs'), data.files.logs, 'logs')
         el('logBox').hidden = !data.files.logs.length
       }
@@ -816,15 +860,15 @@
               node('i', '', c.running ? 'on' : ''),
               node(
                 'small',
-                (!c.ready ? 'Uploads pending' : c.running ? stageLabel(c.running) + ' running' : 'Idle') +
+                (!c.ready ? '待上传' : c.running ? stageLabel(c.running) + '运行中' : '空闲') +
                   ' · ' +
                   fmt(c.last[4]) +
-                  ' tokens',
+                  ' token',
               ),
             )
             if (c.last.length) {
               const last = node('small', summary(c.last))
-              last.title = c.last.join(' · ')
+              last.title = summary(c.last)
               b.append(last)
             }
             b.onclick = () => choose(c.name)
@@ -840,20 +884,25 @@
           timer = setTimeout(refresh, cases.some((c) => c.running) ? 3000 : 10000)
         } catch (err) {
           if (ticket === serial) {
-            el('notice').textContent = err.message
+            el('notice').textContent = errorText(err)
             timer = setTimeout(refresh, 3000)
           }
         }
       }
       let uploadCase = '',
         sendingFiles = false
+      for (const input of document.querySelectorAll('.picker input')) {
+        const label = input.parentElement.querySelector('output')
+        input.onchange = () => { label.textContent = Array.from(input.files, (f) => f.name).join('、') || '未选择文件' }
+        input.form.addEventListener('reset', () => { label.textContent = '未选择文件' })
+      }
       function showCreate(resume = false) {
         uploadCase = resume === true ? selected : ''
         el('create').reset()
         el('caseName').value = uploadCase
         el('caseName').readOnly = !!uploadCase
-        el('createTitle').textContent = uploadCase ? 'Resume case uploads' : 'New case'
-        el('createSubmit').textContent = uploadCase ? 'Continue uploads' : 'Create case'
+        el('createTitle').textContent = uploadCase ? '继续上传案件资料' : '新建案件'
+        el('createSubmit').textContent = uploadCase ? '继续上传' : '创建案件'
         el('createError').textContent = ''
         el('fileTransfer').hidden = true
         el('newcase').showModal()
@@ -865,9 +914,9 @@
           const info = await api('/api/case?' + new URLSearchParams({ case: name }))
           if (name === uploadCase && info.missing.length)
             el('createError').textContent =
-              'Remaining files: ' + info.missing.map((pair) => pair.join('/')).join(', ')
+              '待上传文件：' + info.missing.map((pair) => pair.join('/')).join(', ')
         } catch (err) {
-          el('createError').textContent = err.message
+          el('createError').textContent = errorText(err)
         }
       }
       el('add').onclick = el('first').onclick = () => showCreate()
@@ -877,10 +926,7 @@
         if (sendingFiles) event.preventDefault()
       }
       for (const id of ['stage1', 'stage2'])
-        el(id).onclick = () => {
-          if (stage !== id) el('caps').value = ''
-          setStage(id)
-        }
+        el(id).onclick = () => setStage(id)
 
       function sendFile(action, params, file, progress) {
         return new Promise((resolve, reject) => {
@@ -895,8 +941,8 @@
           request.onload = () =>
             request.status >= 200 && request.status < 300
               ? resolve(request.response)
-              : reject(Error(request.response || 'Upload failed.'))
-          request.onerror = () => reject(Error('Connection interrupted.'))
+              : reject(Error(request.response || '上传失败，请重试。'))
+          request.onerror = () => reject(Error('连接中断，请重试。'))
           request.send(file)
         })
       }
@@ -930,7 +976,7 @@
             if (index < 0) continue
             current = group + '/' + file.name
             el('fileTransfer').hidden = false
-            el('fileStep').textContent = 'Uploading file ' + (completed + 1) + ' of ' + info.file_count
+            el('fileStep').textContent = '正在上传第 ' + (completed + 1) + ' 个文件，共 ' + info.file_count + ' 个'
             el('fileName').textContent = current
             el('fileBar').value = 0
             await sendFile('/upload', { case: name, group }, file, (amount) => (el('fileBar').value = amount))
@@ -939,14 +985,14 @@
           }
           current = ''
           if (waiting.length)
-            throw Error('Select the remaining files: ' + waiting.map((p) => p.join('/')).join(', '))
+            throw Error('请选择剩余文件：' + waiting.map((p) => p.join('/')).join(', '))
           await api('/finish', new URLSearchParams({ case: name }))
           el('newcase').close()
           e.target.reset()
           choose(name)
         } catch (err) {
-          el('createError').textContent = (current ? 'Failed to upload ' + current + '. ' : '') + err.message
-          el('createSubmit').textContent = uploadCase ? 'Retry uploads' : 'Create case'
+          el('createError').textContent = (current ? '上传失败：' + current + '。' : '') + errorText(err)
+          el('createSubmit').textContent = uploadCase ? '重新上传' : '创建案件'
           await refresh()
         } finally {
           sendingFiles = false
@@ -966,18 +1012,18 @@
           const p = await api('/preview', form)
           if (
             confirm(
-              'Start ' +
+              '确认运行' +
                 stageLabel(stage) +
-                ' with a cap of ' +
+                '，本次上限为 ' +
                 fmt(p.cap) +
-                ' tokens?\n\n' +
+                ' token？\n\n' +
                 p.command +
-                '\n\nThis run can incur model charges.',
+                '\n\n本次运行可能产生模型费用。',
             )
           )
             await api('/run', form)
         } catch (err) {
-          el('notice').textContent = err.message
+          el('notice').textContent = errorText(err)
         } finally {
           busy = false
           await refresh()
@@ -988,9 +1034,9 @@
         f.set('case', selected)
         try {
           await api('/stop', f)
-          el('notice').textContent = 'Stage stopped.'
+          el('notice').textContent = '已停止运行。'
         } catch (err) {
-          el('notice').textContent = err.message
+          el('notice').textContent = errorText(err)
         }
         await refresh()
       }
@@ -1000,9 +1046,9 @@
         try {
           await sendFile('/answers', { case: selected }, file)
           e.target.reset()
-          el('notice').textContent = 'Answered workbook saved.'
+          el('notice').textContent = '客户答复清单已保存。'
         } catch (err) {
-          el('notice').textContent = err.message
+          el('notice').textContent = errorText(err)
         }
         await refresh()
       }

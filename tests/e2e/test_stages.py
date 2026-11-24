@@ -121,6 +121,7 @@ def test_small_cap_does_not_mark_existing_draft_revised(tmp_path, monkeypatch, c
     model = ScriptedModel(responses=[AIMessage(content="unused")])
     monkeypatch.setattr(cli, "make_model", lambda phase: model)
     run(tmp_path, "stage2", 1, monkeypatch)
+    assert not (tmp_path / ".stage2-complete").exists()
     assert "Unfinished sections: A (revise), B (revise)" in capsys.readouterr().out
     assert "\trevise\t0\t0\tunfinished" in (tmp_path / "work/runs/progress.txt").read_text()
     assert body.read_text() == "Original draft"
