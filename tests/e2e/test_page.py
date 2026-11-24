@@ -96,22 +96,31 @@ def test_local_page(workspace, tmp_path):
             time.sleep(.1)
         pytest.fail("Stage still running")
 
-    assert b"Report Agent" in get(url, "/")
+    page = get(url, "/").decode()
+    assert 'lang="zh-CN"' in page and "上传客户答复" in page
+    (cases / ".private").mkdir()
+    assert json.loads(get(url, "/api/cases")) == []
+    with pytest.raises(HTTPError, match="404"):
+        get(url, "/api/case?case=.private")
+    with pytest.raises(HTTPError, match="400"):
+        post(url, "/create", {"case": ".hidden"})
     other = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     assert other.returncode and "using this cases folder" in other.stderr
     inputs = [("commission", ("brief.md", b"Survey the gate.")),
               ("sources", ("field.txt", b"Gate log")), ("sources", ("现场记录.txt", b"Notes"))]
     post(url, "/create", key)
+    assert json.loads(get(url, case_url))["step"] == 1
     plan = [(group, filename) for group, (filename, _) in inputs]
     post(url, "/prepare", key + [("files", json.dumps(plan))])
     for group, (filename, data) in inputs:
         upload(url, "/upload", key + [("group", group), ("file", filename)], data)
     with pytest.raises(HTTPError) as duplicate:
         upload(url, "/upload", key + [("group", "sources"), ("file", "field.txt")], b"replacement")
-    assert duplicate.value.code == 409 and json.load(duplicate.value) == "A file with this name already exists in sources/."
+    assert duplicate.value.code == 409 and json.load(duplicate.value) == "sources/ 中已有同名文件。"
     post(url, "/finish", key)
     assert (case / "sources/field.txt").read_bytes() == b"Gate log"
     assert (case / "sources/现场记录.txt").read_bytes() == b"Notes"
+    assert json.loads(get(url, case_url))["step"] == 2
     template = case / "commission/template"
     template.mkdir()
     (template / "settings.txt").write_text("xlsx_file: Survey 答复.xlsx\n")
@@ -129,14 +138,17 @@ def test_local_page(workspace, tmp_path):
         post(url, "/run", opts)
     detail = wait_idle()
     assert detail["last"][2] == "export" and int(detail["last"][4]) > 0
+    assert detail["step"] == 3
     cfg = _settings(case)
     def download(filename):
         return get(url, "/download?" + urlencode(key + [("group","out"), ("file",filename)]))
     sheet = download(cfg["xlsx_file"])
     assert sheet == (case / "out" / cfg["xlsx_file"]).read_bytes()
+    assert json.loads(get(url, case_url))["step"] == 4
     sent = tmp_path / "answered.xlsx"
     _xlsx(sent, cfg["sheet_columns"].split("|"), [[1,"Reservoir","","Colour?","","Open","amber","Operator"]], cfg)
     upload(url, "/answers", key + [("file", sent.name)], sent.read_bytes())
+    assert json.loads(get(url, case_url))["step"] == 5
     dst = case / "out" / cfg["xlsx_file"]
     assert next(dst.parent.glob(dst.stem + ".before-answers-*.xlsx")).read_bytes() == sheet
     assert dst.read_bytes() == sent.read_bytes()
@@ -145,11 +157,14 @@ def test_local_page(workspace, tmp_path):
     detail = wait_idle()
     assert detail["last"][2] == "export"
     assert detail["case_tokens"] == 98 and int(detail["last"][4]) == 14
+    assert detail["step"] == 6
     final = Document(BytesIO(download(cfg["docx_file"])))
     assert "Gate colour is amber." in [p.text for p in final.paragraphs]
     transcript, = (case / "work/runs").glob("*-revise.jsonl")
     assert "1: amber (Operator)" in json.loads(transcript.read_text().splitlines()[0])["content"]
     assert len(list((case / "work/runs").glob("stage*-*.log"))) == 2
+    upload(url, "/answers", key + [("file", sent.name)], sent.read_bytes())
+    assert json.loads(get(url, case_url))["step"] == 5
     post(url, "/run", opts)
     post(url, "/stop", key)
     assert not wait_idle()["running"]
