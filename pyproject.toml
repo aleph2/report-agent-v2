@@ -26,6 +26,6 @@ packages = ["reportagent", "reportagent.export", "reportagent.skills"]
 "reportagent.skills" = "skills"
 
 [tool.setuptools.package-data]
-"reportagent" = ["phase-settings.toml"]
+"reportagent" = ["phase-settings.toml", "page.html"]
 "reportagent.export" = ["reference.docx", "settings.txt"]
 "reportagent.skills" = ["plan-report/SKILL.md", "gather-evidence/SKILL.md", "write-section/SKILL.md", "review-section/SKILL.md", "verify-sources/SKILL.md", "clarify-section/SKILL.md"]

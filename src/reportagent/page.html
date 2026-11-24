@@ -1,0 +1,1012 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Report Agent · Case workspace</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #172e30;
+        --sub: #536867;
+        --line: #d1dcd7;
+        --teal: #086755;
+        --paper: #f7f8f4;
+        font:
+          15px/1.45 Inter,
+          'Segoe UI',
+          Arial,
+          sans-serif;
+        color: var(--ink);
+        background: var(--paper);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      button,
+      input,
+      textarea,
+      select {
+        font: inherit;
+      }
+      button,
+      a,
+      input,
+      textarea,
+      select {
+        outline-offset: 4px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+      button {
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 8px 13px;
+        color: var(--ink);
+        background: white;
+        font-weight: 600;
+      }
+      button:hover:enabled {
+        border-color: #477466;
+      }
+      button.primary {
+        background: var(--teal);
+        border-color: var(--teal);
+        color: white;
+      }
+      button.primary:hover:enabled {
+        background: #075545;
+      }
+      .shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 245px minmax(0, 1fr);
+      }
+      aside {
+        display: flex;
+        flex-direction: column;
+        background: #173739;
+        color: #f0f6f2;
+        padding: 30px 19px 22px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 23px;
+        letter-spacing: -0.9px;
+        font-weight: 650;
+        padding: 0 6px;
+      }
+      .mark {
+        display: inline-grid;
+        place-items: center;
+        width: 32px;
+        height: 36px;
+        border: 1px solid #abd4bd;
+        border-radius: 4px;
+        color: #c7eacc;
+        font:
+          bold 24px Georgia,
+          serif;
+      }
+      .rail-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 43px 5px 13px;
+      }
+      .rail-head h2 {
+        font-size: 14px;
+        color: #d6e8e1;
+      }
+      .rail-head button {
+        color: #eaf4ee;
+        background: transparent;
+        border-color: #537271;
+        font:
+          600 13px 'Segoe UI',
+          sans-serif;
+        padding: 6px 9px;
+      }
+      .rail-list {
+        display: grid;
+        gap: 6px;
+      }
+      .case-link {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 3px 8px;
+        background: transparent;
+        color: white;
+        text-align: left;
+        border: 1px solid transparent;
+        width: 100%;
+        padding: 12px;
+        border-radius: 5px;
+      }
+      .case-link[aria-current='true'] {
+        background: #284c4b;
+        border-color: #587a6c;
+        box-shadow: inset 3px 0 #98ceaa;
+      }
+      .case-link strong {
+        overflow-wrap: anywhere;
+        font-size: 14px;
+      }
+      .case-link small {
+        grid-column: 1/-1;
+        color: #c1d7cf;
+        font-weight: 400;
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .case-link i,
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #92b7a5;
+        align-self: center;
+      }
+      .case-link i.on,
+      .dot.on {
+        background: #53b77d;
+      }
+      .rail-foot {
+        margin-top: auto;
+        padding: 25px 7px 0;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-size: 12px;
+        color: #bfd2cc;
+      }
+      main {
+        width: 100%;
+        max-width: 1550px;
+        margin: 0 auto;
+        padding: 31px clamp(22px, 3.3vw, 54px) 32px;
+      }
+      .crumb {
+        color: var(--sub);
+        font-size: 13px;
+        margin-bottom: 21px;
+      }
+      .crumb span {
+        margin: 0 0.55em;
+        color: #91a49c;
+      }
+      .title-row,
+      .card-head,
+      .progress-head,
+      .actions,
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .title-row {
+        justify-content: space-between;
+        margin-bottom: 23px;
+        flex-wrap: wrap;
+      }
+      h1 {
+        font:
+          500 clamp(31px, 3.3vw, 51px)/1.08 Georgia,
+          'Times New Roman',
+          serif;
+        letter-spacing: -1.5px;
+        overflow-wrap: anywhere;
+      }
+      .status {
+        font-size: 13px;
+        gap: 7px;
+        background: #e7eee6;
+        border: 1px solid #cbd9cc;
+        padding: 5px 11px;
+        border-radius: 20px;
+        color: #365745;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1.7fr;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        padding: 13px 0;
+        margin-bottom: 21px;
+      }
+      .metric {
+        padding-right: 14px;
+      }
+      .metric + .metric {
+        border-left: 1px solid var(--line);
+        padding-left: 20px;
+      }
+      .label,
+      label {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .metric .label {
+        display: block;
+        color: var(--sub);
+        font-weight: 500;
+      }
+      .value {
+        font-size: 22px;
+        font-weight: 650;
+        font-variant-numeric: tabular-nums;
+      }
+      .last {
+        display: block;
+        font-size: 15px;
+        margin-top: 4px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+        gap: 17px;
+      }
+      .card {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 19px 21px;
+      }
+      .card h2 {
+        font:
+          500 24px/1.1 Georgia,
+          serif;
+        letter-spacing: -0.6px;
+      }
+      .card-head,
+      .progress-head {
+        justify-content: space-between;
+        margin-bottom: 17px;
+      }
+      .switch {
+        display: flex;
+        gap: 3px;
+        background: #ecf1ec;
+        border-radius: 5px;
+        padding: 3px;
+      }
+      .switch button {
+        padding: 4px 11px;
+        border-color: transparent;
+        background: transparent;
+        font-size: 12px;
+        color: #536861;
+      }
+      .switch button[aria-pressed='true'] {
+        background: white;
+        color: #155747;
+        box-shadow: 0 1px 4px #29493724;
+      }
+      .field {
+        display: grid;
+        gap: 4px;
+        margin: 10px 0;
+      }
+      .field input,
+      .field textarea {
+        background: #fcfdfa;
+        border: 1px solid #bfcfc6;
+        border-radius: 4px;
+        padding: 7px 10px;
+        width: 100%;
+        color: var(--ink);
+      }
+      .field textarea {
+        height: 50px;
+        resize: vertical;
+        font:
+          13px/1.4 Consolas,
+          monospace;
+      }
+      .hint,
+      .empty,
+      .optional {
+        font-size: 12px;
+        color: var(--sub);
+        font-weight: 400;
+      }
+      .actions {
+        margin-top: 13px;
+        flex-wrap: wrap;
+      }
+      .files-group + .files-group {
+        margin-top: 10px;
+      }
+      .files-group h3 {
+        font-size: 12px;
+        color: var(--sub);
+        font-weight: 600;
+      }
+      .file-list {
+        display: flex;
+        gap: 4px 14px;
+        flex-wrap: wrap;
+        max-height: 88px;
+        overflow: auto;
+      }
+      .file-list a {
+        color: var(--teal);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+        text-underline-offset: 3px;
+      }
+      .answer-form {
+        border-top: 1px solid var(--line);
+        margin-top: 12px;
+        padding-top: 11px;
+      }
+      .upload-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 5px;
+      }
+      .upload-row input {
+        min-width: 0;
+        width: 100%;
+        font-size: 12px;
+      }
+      .upload-row button {
+        white-space: nowrap;
+        font-size: 12px;
+        padding: 6px 10px;
+      }
+      input::file-selector-button {
+        border: 1px solid #c4d1c8;
+        border-radius: 4px;
+        background: #f1f5ef;
+        color: var(--ink);
+        padding: 5px 7px;
+        margin-right: 6px;
+      }
+      .progress {
+        margin-top: 17px;
+      }
+      .progress-head {
+        margin-bottom: 10px;
+      }
+      .caps {
+        font:
+          12px/1.6 Consolas,
+          monospace;
+        color: #30594a;
+        background: #edf4ec;
+        border-radius: 4px;
+        padding: 7px 10px;
+        margin-bottom: 10px;
+        overflow-wrap: anywhere;
+      }
+      .scroll {
+        max-height: 310px;
+        overflow: auto;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        text-align: left;
+        font-size: 12px;
+      }
+      th,
+      td {
+        padding: 6px 7px;
+        border-bottom: 1px solid #e4eae4;
+        white-space: nowrap;
+      }
+      th {
+        position: sticky;
+        top: 0;
+        background: #f7f9f5;
+        font-size: 11px;
+        letter-spacing: 0.2px;
+        color: var(--sub);
+      }
+      td:nth-child(4),
+      td:nth-child(5) {
+        font-variant-numeric: tabular-nums;
+      }
+      td:last-child {
+        color: #3c6551;
+      }
+      .logs {
+        margin-top: 10px;
+      }
+      .logs summary {
+        cursor: pointer;
+        color: var(--sub);
+        font-size: 13px;
+      }
+      .notice {
+        margin-bottom: 10px;
+        color: #69431a;
+        font-size: 14px;
+      }
+      .empty {
+        padding: 4px 0;
+      }
+      .welcome {
+        max-width: 520px;
+        padding: 30px 0;
+      }
+      .welcome p {
+        margin: 15px 0;
+        color: var(--sub);
+      }
+      dialog {
+        width: min(490px, 92vw);
+        padding: 24px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+      }
+      dialog::backdrop {
+        background: #0c252b66;
+      }
+      dialog h2 {
+        font:
+          500 28px Georgia,
+          serif;
+      }
+      dialog .actions {
+        justify-content: flex-end;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (max-width: 960px) {
+        .shell {
+          grid-template-columns: 195px minmax(0, 1fr);
+        }
+        main {
+          padding: 24px 18px;
+        }
+        .card {
+          padding: 16px;
+        }
+        .grid {
+          gap: 11px;
+        }
+        .card-head {
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+      }
+      @media (max-width: 730px) {
+        .shell {
+          display: block;
+        }
+        aside {
+          padding: 13px 17px;
+        }
+        .brand {
+          font-size: 19px;
+        }
+        .mark {
+          width: 24px;
+          height: 27px;
+          font-size: 19px;
+        }
+        .rail-head {
+          margin: 10px 4px 6px;
+        }
+        .rail-list {
+          display: flex;
+          flex-wrap: wrap;
+        }
+        .case-link {
+          width: auto;
+          padding: 6px 10px;
+        }
+        .rail-foot {
+          display: none;
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .crumb {
+          margin-bottom: 11px;
+        }
+        .title-row {
+          margin-bottom: 14px;
+        }
+        .scroll {
+          max-height: 330px;
+        }
+        .metrics {
+          margin-bottom: 13px;
+        }
+      }
+      #fileTransfer {
+        background: #edf4ec;
+        padding: 11px 13px;
+        border-radius: 5px;
+        margin-top: 14px;
+      }
+      #fileStep,
+      #fileName {
+        display: block;
+        overflow-wrap: anywhere;
+      }
+      #fileName {
+        color: var(--sub);
+        font-size: 13px;
+      }
+      #fileBar {
+        width: 100%;
+        height: 9px;
+        accent-color: var(--teal);
+      }
+      #resumeUploads {
+        margin-bottom: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside>
+        <div class="brand"><span class="mark" aria-hidden="true">R</span> Report Agent</div>
+        <div class="rail-head">
+          <h2>Cases</h2>
+          <button id="add" type="button">+ New case</button>
+        </div>
+        <nav class="rail-list" id="cases" aria-label="Cases"></nav>
+        <div class="rail-foot"><i class="dot"></i> Local workspace</div>
+      </aside>
+      <main>
+        <div class="crumb">Workspace <span>/</span> Cases</div>
+        <p class="notice" id="notice" role="status"></p>
+        <section id="welcome" class="welcome" hidden>
+          <h1>Case workspace</h1>
+          <p>Create a case to upload a commission and source files.</p>
+          <button id="first" class="primary">New case</button>
+        </section>
+        <div id="detail" hidden>
+          <header class="title-row">
+            <h1 id="name"></h1>
+            <span class="status"><i class="dot" id="dot"></i><span id="status"></span></span>
+          </header>
+          <div class="metrics">
+            <div class="metric">
+              <span class="label">Tokens this run</span><strong class="value" id="tokens"></strong>
+            </div>
+            <div class="metric">
+              <span class="label">Case total tokens</span><strong class="value" id="caseTokens"></strong>
+            </div>
+            <div class="metric">
+              <span class="label">Last progress</span><strong class="last" id="last"></strong>
+            </div>
+          </div>
+          <button class="primary" type="button" id="resumeUploads" hidden>Resume uploads</button>
+          <div class="grid">
+            <section class="card">
+              <div class="card-head">
+                <h2>Run controls</h2>
+                <div class="switch" aria-label="Stage">
+                  <button type="button" id="stage1" aria-pressed="true">Stage 1</button
+                  ><button type="button" id="stage2" aria-pressed="false">Stage 2</button>
+                </div>
+              </div>
+              <form id="runform">
+                <div class="field">
+                  <label for="cap">Maximum tokens</label
+                  ><input
+                    id="cap"
+                    name="max_tokens"
+                    type="number"
+                    min="0"
+                    step="1"
+                    required
+                    placeholder="Enter a run limit"
+                  />
+                </div>
+                <div class="field">
+                  <label for="caps">Phase caps <span class="optional">· optional, one per line</span></label
+                  ><textarea id="caps" name="phase_caps" placeholder="clarify=60000"></textarea>
+                </div>
+                <div class="actions">
+                  <button class="primary" id="start">Run stage 1</button
+                  ><button type="button" id="stop" hidden>Stop stage</button>
+                </div>
+              </form>
+            </section>
+            <section class="card">
+              <div class="card-head"><h2>Case files</h2></div>
+              <div id="files"></div>
+              <form class="answer-form" id="answers">
+                <label for="sheet">Answered client sheet</label>
+                <div class="upload-row">
+                  <input id="sheet" name="sheet" type="file" accept=".xlsx" required /><button id="upload">
+                    Upload
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+          <section class="card progress">
+            <div class="progress-head">
+              <h2>Run progress</h2>
+              <span id="progressState" class="hint"></span>
+            </div>
+            <div id="startingCaps" class="caps" hidden></div>
+            <div id="progressEmpty" class="empty">Progress appears when a stage starts.</div>
+            <div class="scroll">
+              <table id="progressTable" hidden>
+                <thead>
+                  <tr>
+                    <th>Time (local)</th>
+                    <th>Section</th>
+                    <th>Phase</th>
+                    <th>Tokens used</th>
+                    <th>Running total</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="rows"></tbody>
+              </table>
+            </div>
+            <details class="logs" id="logBox">
+              <summary>Stage logs</summary>
+              <div class="file-list" id="logs"></div>
+            </details>
+          </section>
+        </div>
+      </main>
+    </div>
+    <dialog id="newcase">
+      <form id="create">
+        <h2 id="createTitle">New case</h2>
+        <p class="notice" id="createError" role="status"></p>
+        <div class="field">
+          <label for="caseName">Case name</label><input id="caseName" name="case" required />
+        </div>
+        <div class="field">
+          <label for="commission">Commission files</label
+          ><input type="file" id="commission" name="commission" multiple />
+        </div>
+        <div class="field">
+          <label for="sources">Source files</label><input type="file" id="sources" name="sources" multiple />
+        </div>
+        <div id="fileTransfer" hidden aria-live="polite">
+          <strong id="fileStep"></strong><span id="fileName"></span>
+          <progress id="fileBar" max="1" value="0" aria-label="Current file upload"></progress>
+        </div>
+        <div class="actions">
+          <button id="cancel" type="button">Cancel</button
+          ><button class="primary" id="createSubmit">Create case</button>
+        </div>
+      </form>
+    </dialog>
+    <script>
+      'use strict'
+      const el = (id) => document.getElementById(id)
+      const node = (tag, text, cls) => {
+        const n = document.createElement(tag)
+        n.textContent = text
+        if (cls) n.className = cls
+        return n
+      }
+      const fmt = (n) => Number(n || 0).toLocaleString()
+      const when = (s) =>
+        new Date(s).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      const stageLabel = (s) => (s === 'stage1' ? 'Stage 1' : s === 'stage2' ? 'Stage 2' : s)
+      let selected = new URLSearchParams(location.search).get('case'),
+        stage = 'stage1',
+        serial = 0,
+        timer,
+        busy = false
+      async function api(path, form) {
+        const opt = form
+          ? { method: 'POST', headers: { 'X-Report-Agent': '1' }, body: new URLSearchParams(form) }
+          : {}
+        const response = await fetch(path, opt)
+        const data = await response.json()
+        if (!response.ok) throw Error(data)
+        return data
+      }
+      function summary(row) {
+        return [when(row[0]), row[1] === '-' ? '' : row[1], stageLabel(row[2]), row[5]]
+          .filter(Boolean)
+          .join(' · ')
+      }
+      function setStage(s) {
+        stage = s
+        for (const id of ['stage1', 'stage2']) el(id).setAttribute('aria-pressed', String(id === s))
+        el('start').textContent = 'Run ' + stageLabel(s).toLowerCase()
+        el('caps').placeholder = s === 'stage1' ? 'clarify=60000' : 'revise=220000'
+      }
+      function choose(name) {
+        selected = name
+        el('runform').reset()
+        el('answers').reset()
+        el('notice').textContent = ''
+        setStage('stage1')
+        const url = new URL(location)
+        url.searchParams.set('case', name)
+        history.replaceState(null, '', url)
+        refresh()
+      }
+      function links(parent, names, group) {
+        parent.replaceChildren()
+        for (const name of names) {
+          const a = node('a', name)
+          a.href = '/download?' + new URLSearchParams({ case: selected, group, file: name })
+          a.download = name
+          parent.append(a)
+        }
+      }
+      function render(data) {
+        el('name').textContent = data.name
+        el('status').textContent = !data.ready
+          ? 'Uploads pending'
+          : data.running
+            ? stageLabel(data.running) + ' running'
+            : 'Idle'
+        el('resumeUploads').hidden = data.ready
+        el('caseTokens').textContent = fmt(data.case_tokens)
+        el('dot').classList.toggle('on', !!data.running)
+        el('tokens').textContent = fmt(data.last[4])
+        el('last').textContent = data.last.length ? summary(data.last) : 'No runs yet'
+        el('start').disabled = !data.ready || !!data.running || busy
+        el('stop').hidden = !data.running
+        el('upload').disabled = !data.ready || !!data.running
+        el('files').replaceChildren()
+        for (const [group, title] of [
+          ['out', 'Outputs'],
+          ['registers', 'Question registers'],
+        ]) {
+          const box = node('div', '', 'files-group')
+          box.append(node('h3', title))
+          const list = node('div', '', 'file-list')
+          links(list, data.files[group], group)
+          if (!list.children.length) list.append(node('span', 'No files yet', 'empty'))
+          box.append(list)
+          el('files').append(box)
+        }
+        const start = data.rows.filter((row) => row[5] === 'start').at(-1)
+        el('startingCaps').hidden = !start
+        el('startingCaps').textContent = start ? stageLabel(start[2]) + ' · ' + start[6] : ''
+        el('rows').replaceChildren()
+        for (const row of data.rows.slice().reverse()) {
+          const tr = document.createElement('tr')
+          for (const t of [when(row[0]), row[1], stageLabel(row[2]), fmt(row[3]), fmt(row[4]), row[5]])
+            tr.append(node('td', t))
+          el('rows').append(tr)
+        }
+        el('progressTable').hidden = !data.rows.length
+        el('progressEmpty').hidden = !!data.rows.length
+        el('progressState').textContent = data.running ? 'Refreshing every 3 seconds' : ''
+        links(el('logs'), data.files.logs, 'logs')
+        el('logBox').hidden = !data.files.logs.length
+      }
+      async function refresh() {
+        const ticket = ++serial
+        clearTimeout(timer)
+        try {
+          const cases = await api('/api/cases')
+          if (ticket !== serial) return
+          if (!cases.some((c) => c.name === selected)) selected = cases[0]?.name || ''
+          el('cases').replaceChildren()
+          for (const c of cases) {
+            const b = node('button', '', 'case-link')
+            b.type = 'button'
+            b.setAttribute('aria-current', String(c.name === selected))
+            b.append(
+              node('strong', c.name),
+              node('i', '', c.running ? 'on' : ''),
+              node(
+                'small',
+                (!c.ready ? 'Uploads pending' : c.running ? stageLabel(c.running) + ' running' : 'Idle') +
+                  ' · ' +
+                  fmt(c.last[4]) +
+                  ' tokens',
+              ),
+            )
+            if (c.last.length) {
+              const last = node('small', summary(c.last))
+              last.title = c.last.join(' · ')
+              b.append(last)
+            }
+            b.onclick = () => choose(c.name)
+            el('cases').append(b)
+          }
+          el('welcome').hidden = !!selected
+          el('detail').hidden = !selected
+          if (selected) {
+            const data = await api('/api/case?' + new URLSearchParams({ case: selected }))
+            if (ticket !== serial) return
+            render(data)
+          }
+          timer = setTimeout(refresh, cases.some((c) => c.running) ? 3000 : 10000)
+        } catch (err) {
+          if (ticket === serial) {
+            el('notice').textContent = err.message
+            timer = setTimeout(refresh, 3000)
+          }
+        }
+      }
+      let uploadCase = '',
+        sendingFiles = false
+      function showCreate(resume = false) {
+        uploadCase = resume === true ? selected : ''
+        el('create').reset()
+        el('caseName').value = uploadCase
+        el('caseName').readOnly = !!uploadCase
+        el('createTitle').textContent = uploadCase ? 'Resume case uploads' : 'New case'
+        el('createSubmit').textContent = uploadCase ? 'Continue uploads' : 'Create case'
+        el('createError').textContent = ''
+        el('fileTransfer').hidden = true
+        el('newcase').showModal()
+        el(uploadCase ? 'commission' : 'caseName').focus()
+        if (uploadCase) showMissing(uploadCase)
+      }
+      async function showMissing(name) {
+        try {
+          const info = await api('/api/case?' + new URLSearchParams({ case: name }))
+          if (name === uploadCase && info.missing.length)
+            el('createError').textContent =
+              'Remaining files: ' + info.missing.map((pair) => pair.join('/')).join(', ')
+        } catch (err) {
+          el('createError').textContent = err.message
+        }
+      }
+      el('add').onclick = el('first').onclick = () => showCreate()
+      el('resumeUploads').onclick = () => showCreate(true)
+      el('cancel').onclick = () => el('newcase').close()
+      el('newcase').oncancel = (event) => {
+        if (sendingFiles) event.preventDefault()
+      }
+      for (const id of ['stage1', 'stage2'])
+        el(id).onclick = () => {
+          if (stage !== id) el('caps').value = ''
+          setStage(id)
+        }
+
+      function sendFile(action, params, file, progress) {
+        return new Promise((resolve, reject) => {
+          const request = new XMLHttpRequest()
+          request.open('POST', action + '?' + new URLSearchParams({ ...params, file: file.name }))
+          request.setRequestHeader('X-Report-Agent', '1')
+          request.setRequestHeader('Content-Type', 'application/octet-stream')
+          request.responseType = 'json'
+          request.upload.onprogress = (e) => {
+            if (progress && e.lengthComputable) progress(e.loaded / e.total)
+          }
+          request.onload = () =>
+            request.status >= 200 && request.status < 300
+              ? resolve(request.response)
+              : reject(Error(request.response || 'Upload failed.'))
+          request.onerror = () => reject(Error('Connection interrupted.'))
+          request.send(file)
+        })
+      }
+      el('create').onsubmit = async (e) => {
+        e.preventDefault()
+        if (sendingFiles) return
+        sendingFiles = true
+        const inputs = ['commission', 'sources']
+        const queue = inputs.flatMap((group) => Array.from(el(group).files, (file) => ({ group, file })))
+        for (const id of [...inputs, 'createSubmit', 'cancel', 'caseName']) el(id).disabled = true
+        const name = uploadCase || el('caseName').value
+        let current = ''
+        el('createError').textContent = ''
+        try {
+          if (!uploadCase) {
+            await api('/create', new URLSearchParams({ case: name }))
+            uploadCase = name
+            el('caseName').readOnly = true
+            choose(name)
+          }
+          let info = await api('/api/case?' + new URLSearchParams({ case: name }))
+          if (!info.ready && !info.planned) {
+            const files = queue.map(({ group, file }) => [group, file.name])
+            await api('/prepare', new URLSearchParams({ case: name, files: JSON.stringify(files) }))
+            info = await api('/api/case?' + new URLSearchParams({ case: name }))
+          }
+          let completed = info.file_count - info.missing.length
+          const waiting = info.missing.slice()
+          for (const { group, file } of queue) {
+            const index = waiting.findIndex(([g, n]) => g === group && n === file.name)
+            if (index < 0) continue
+            current = group + '/' + file.name
+            el('fileTransfer').hidden = false
+            el('fileStep').textContent = 'Uploading file ' + (completed + 1) + ' of ' + info.file_count
+            el('fileName').textContent = current
+            el('fileBar').value = 0
+            await sendFile('/upload', { case: name, group }, file, (amount) => (el('fileBar').value = amount))
+            completed++
+            waiting.splice(index, 1)
+          }
+          current = ''
+          if (waiting.length)
+            throw Error('Select the remaining files: ' + waiting.map((p) => p.join('/')).join(', '))
+          await api('/finish', new URLSearchParams({ case: name }))
+          el('newcase').close()
+          e.target.reset()
+          choose(name)
+        } catch (err) {
+          el('createError').textContent = (current ? 'Failed to upload ' + current + '. ' : '') + err.message
+          el('createSubmit').textContent = uploadCase ? 'Retry uploads' : 'Create case'
+          await refresh()
+        } finally {
+          sendingFiles = false
+          for (const id of [...inputs, 'createSubmit', 'cancel', 'caseName']) el(id).disabled = false
+        }
+      }
+      el('runform').onsubmit = async (e) => {
+        e.preventDefault()
+        if (busy) return
+        busy = true
+        el('start').disabled = true
+        el('notice').textContent = ''
+        const form = new FormData(e.target)
+        form.set('case', selected)
+        form.set('stage', stage)
+        try {
+          const p = await api('/preview', form)
+          if (
+            confirm(
+              'Start ' +
+                stageLabel(stage) +
+                ' with a cap of ' +
+                fmt(p.cap) +
+                ' tokens?\n\n' +
+                p.command +
+                '\n\nThis run can incur model charges.',
+            )
+          )
+            await api('/run', form)
+        } catch (err) {
+          el('notice').textContent = err.message
+        } finally {
+          busy = false
+          await refresh()
+        }
+      }
+      el('stop').onclick = async () => {
+        const f = new FormData()
+        f.set('case', selected)
+        try {
+          await api('/stop', f)
+          el('notice').textContent = 'Stage stopped.'
+        } catch (err) {
+          el('notice').textContent = err.message
+        }
+        await refresh()
+      }
+      el('answers').onsubmit = async (e) => {
+        e.preventDefault()
+        const file = el('sheet').files[0]
+        try {
+          await sendFile('/answers', { case: selected }, file)
+          e.target.reset()
+          el('notice').textContent = 'Answered workbook saved.'
+        } catch (err) {
+          el('notice').textContent = err.message
+        }
+        await refresh()
+      }
+      refresh()
+    </script>
+  </body>
+</html>
