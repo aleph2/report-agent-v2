@@ -130,7 +130,12 @@ def test_local_page(workspace, tmp_path):
         upload(url, "/upload", key + [("group", "sources"), ("file", "../file")], b"x")
     assert not (cases / "Invalid").exists()
     opts = key + [("stage","stage1"), ("max_tokens","300000"), ("phase_caps","clarify=60000")]
+    assert "--library" not in post(url, "/preview", opts)["command"]
+    library = cases.parent / "lessons"
+    library.mkdir()
+    (library / "lessons.md").write_text("Synthetic library sentinel")
     preview = post(url, "/preview", opts)
+    assert "--library" in preview["command"] and str(library) in preview["command"]
     assert "--phase-cap clarify=60000" in preview["command"]
     assert not (case / "work/runs").exists()
     post(url, "/run", opts)
@@ -138,6 +143,11 @@ def test_local_page(workspace, tmp_path):
         post(url, "/run", opts)
     detail = wait_idle()
     assert detail["last"][2] == "export" and int(detail["last"][4]) > 0
+    for phase in ("plan", "gather", "write", "verify-sources", "review", "clarify"):
+        log, = (case / "work/runs").glob(f"*-{phase}.jsonl")
+        prompt = str(json.loads(log.read_text().splitlines()[0])["content"])
+        assert ("Synthetic library sentinel" in prompt) == (phase in ("plan", "gather", "write", "clarify"))
+        assert ("confirm applicable DEFAULT" in prompt) == (phase == "clarify")
     assert detail["step"] == 3
     cfg = _settings(case)
     def download(filename):
@@ -161,7 +171,8 @@ def test_local_page(workspace, tmp_path):
     final = Document(BytesIO(download(cfg["docx_file"])))
     assert "Gate colour is amber." in [p.text for p in final.paragraphs]
     transcript, = (case / "work/runs").glob("*-revise.jsonl")
-    assert "1: amber (Operator)" in json.loads(transcript.read_text().splitlines()[0])["content"]
+    revision_prompt = json.loads(transcript.read_text().splitlines()[0])["content"]
+    assert "1: amber (Operator)" in revision_prompt and "Synthetic library sentinel" not in revision_prompt
     assert len(list((case / "work/runs").glob("stage*-*.log"))) == 2
     upload(url, "/answers", key + [("file", sent.name)], sent.read_bytes())
     assert json.loads(get(url, case_url))["step"] == 5

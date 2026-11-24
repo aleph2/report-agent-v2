@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from decimal import Decimal
 from pathlib import Path
-from shutil import copytree
+from shutil import copyfile, copytree
 from tempfile import TemporaryDirectory, mkdtemp
 import sys
 
@@ -518,16 +518,20 @@ def _preflight(case, section, phase, messages, cap):
     settings = PHASE_SETTINGS[phase]
     reserve, expected = settings["output_reserve"], settings["thinking_budget"]
 
+    floor = 0
+
     @wrap_model_call
     def inspect_request(request, handler):
         prompt = ([request.system_message] if request.system_message else []) + request.messages
+        nonlocal floor
         first = estimate_input(prompt, request.tools, request.model)
+        floor = 3 * (first + reserve)
         # k inputs, k-1 estimated completed outputs, one reserve for the final send.
         affordable = max(0, (cap - reserve + expected) // (first + expected))
         conservative = max(0, cap // (first + reserve))
         print(f"phase={phase} cap={cap} estimated_first_input={first} output_reserve={reserve} "
               f"expected_output={expected} affordable_requests={affordable} conservative_requests={conservative} "
-              f"conservative_floor_3={3 * (first + reserve)}")
+              f"conservative_floor_3={floor}")
         if conservative < 2:
             print(f"{phase}: conservative estimate affords fewer than 2 requests.")
         return AIMessage(content="Preflight complete.")
@@ -536,6 +540,26 @@ def _preflight(case, section, phase, messages, cap):
         agent = build_agent(case, make_model(phase, offline=True), middleware=[inspect_request], phase=phase,
                             section=section, supplied_files=messages[0].response_metadata.get("supplied_files", ()))
         agent.invoke({"messages": messages})
+    return floor
+
+
+def _propose(args, parser):
+    case = args.case.resolve()
+    library = args.library or case.parent.parent / "lessons"
+    messages = [HumanMessage(content=learn.proposal_prompt(case, library))]
+    floor = _preflight(case, None, "learn", messages, args.max_tokens)
+    if args.preflight:
+        return
+    if args.max_tokens < floor:
+        parser.error(f"learn needs a cap of at least {floor} for three conservative requests")
+    runs = case / "work/runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    target = case / "work/learn/proposals.md"
+    with learn.observe_run(case, None, "learn propose", args.max_tokens, None) as receipt:
+        if target.is_file():
+            backup = target.with_name(f"proposals-{receipt['run_id']}.md")
+            copyfile(target, backup)
+        _run_phase(case, "learn", messages, args.max_tokens, runs, receipt=receipt)
 
 
 def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=None, receipt=None):
@@ -546,14 +570,14 @@ def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=N
         before = learn.snapshot(case, section, check, _risk_statements)
         observation = learn.begin_phase(receipt, phase, log, limit, before)
     cap = TokenCapMiddleware(limit, remind=phase in ("plan", "gather", "verify-sources", "review"),
-                             phase=phase if phase in REVISION_CAPS else None, info=True, guard=True,
+                             phase=phase if phase in PHASE_SKILLS else None, info=True, guard=True,
                              request_log=log.with_suffix(".requests.jsonl"))
     config = {"configurable": {"thread_id": log.stem}, "max_concurrency": 1}
     resume = None
     try:
         model = make_model(phase)
         agent = build_agent(case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
-                            phase=phase if phase in REVISION_CAPS else None, section=section,
+                            phase=phase if phase in PHASE_SKILLS else None, section=section,
                             supplied_files=messages[0].response_metadata.get("supplied_files", ()))
         # Flush each checkpoint before advancing; avoids queued background writes.
         try:
@@ -763,7 +787,7 @@ def _phase_overrides(specs, selected, parser):
     return overrides
 
 
-def _stage(case, stage, cap, specs, parser):
+def _stage(case, stage, cap, specs, parser, library=None):
     if cap < 0:
         parser.error("--max-tokens must be nonnegative")
     selected = STAGE_PHASES[stage]
@@ -803,12 +827,17 @@ def _stage(case, stage, cap, specs, parser):
             return int(remaining * GATHER_BUDGET_FRACTION)
         return min(remaining, overrides.get(phase, REVISION_CAPS.get(phase, remaining)))
 
+    lessons = learn.library_text(library) if stage == "stage1" else ""
     limits = " ".join(f"{phase}={phase_limit(phase, cap)}" for phase in selected)
     record("-", stage, 0, "start", f"max-tokens={cap} {limits}")
 
     def run_phase(name, phase, prompt, extra=""):
         limit = phase_limit(phase, cap - total)
         messages = _phase_messages(case, name, phase, prompt)
+        if lessons and phase in ("plan", "gather", "write", "clarify"):
+            messages[0].content += "\n\nOwner-adopted lessons for reference:\n" + lessons
+            if phase == "clarify":
+                messages[0].content += "\nAsk the client to confirm applicable DEFAULT lessons for this case."
         if extra:
             messages[0].content += "\n\n" + extra
         with learn.observe_run(case, name, stage, limit, None) as receipt:
@@ -1187,6 +1216,9 @@ def _serve(cases, port):
             specs = [s.strip() for s in fields.get("phase_caps", "").splitlines() if s.strip()]
             _phase_overrides(specs, STAGE_PHASES[stage], self)
             argv = [sys.executable, "-m", "reportagent", stage, str(case), "--max-tokens", cap]
+            library = cases.parent / "lessons"
+            if library.is_dir():
+                argv.extend(("--library", str(library)))
             for spec in specs:
                 argv.extend(("--phase-cap", spec))
             command = shlex.join(argv)
@@ -1288,6 +1320,8 @@ def main():
         if name in ("revise", "stage1", "stage2"):
             command.add_argument("--phase-cap", action="append", default=[], metavar="NAME=N",
                                  help="Override one selected phase's token cap (repeatable)")
+        if name in STAGE_PHASES:
+            command.add_argument("--library", type=Path, help="directory containing owner-adopted lessons.md")
         if name == "run":
             command.add_argument("--write-only", action="store_true")
             command.add_argument("--section")
@@ -1297,7 +1331,7 @@ def main():
     replay = commands.add_parser("replay", help="compare one skill on frozen phase inputs")
     replay.add_argument("case", type=Path)
     selection = replay.add_mutually_exclusive_group(required=True)
-    selection.add_argument("--skill", choices=sorted(set(PHASE_SKILLS.values())))
+    selection.add_argument("--skill", choices=sorted(PHASE_SKILLS[p] for p in REPLAY_CAPS))
     selection.add_argument("--batch", choices=REPLAY_BATCHES)
     replay.add_argument("--section", help="exact frozen section name (required for a batch)")
     replay.add_argument("--historical-input", action="store_true", help="use the exact recorded leading messages")
@@ -1308,7 +1342,7 @@ def main():
     if args.command == "serve":
         return _serve(args.cases, args.port)
     if args.command == "learn":
-        return learn.command(args)
+        return _propose(args, parser) if args.action == "propose" else learn.command(args)
     if args.command in ("plan", "run", "review", "revise", "replay") and not getattr(args, "preflight", False):
         with learn.observe_run(args.case, getattr(args, "section", None), args.command, getattr(args, "max_tokens", None), args.task) as receipt:
             return _execute(args, parser, receipt)
@@ -1317,7 +1351,7 @@ def main():
 
 def _execute(args, parser, receipt):
     if args.command in ("stage1", "stage2"):
-        return _stage(args.case, args.command, args.max_tokens, args.phase_cap, parser)
+        return _stage(args.case, args.command, args.max_tokens, args.phase_cap, parser, args.library)
     if args.command == "replay":
         if args.batch and not args.section:
             parser.error("--batch requires --section")

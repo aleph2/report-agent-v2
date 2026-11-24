@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from hashlib import sha256
 from io import StringIO
+from importlib.resources import files
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ import sys
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from .export.docx import clarification_numbers
+from .export.docx import _settings, _sheet_rows, clarification_numbers
 
 
 def recorded_turns(transcript):
@@ -64,7 +65,7 @@ def _phase_signal(log, phase, section, cap):
         attempts = {n: {} for n in replies}
     target = {"verify-sources": f"reviews/{section}-sources.md", "review": f"reviews/{section}.md",
               "clarify": f"clarifications/{section}.md", "revise": f"sections/{section}.md",
-              "plan": "plan.md", "gather": f"notes/{section}.md", "write": f"sections/{section}.md"}.get(phase)
+              "learn": "learn/proposals.md", "plan": "plan.md", "gather": f"notes/{section}.md", "write": f"sections/{section}.md"}.get(phase)
     wrote = defaultdict(set)
     for turn, call, success in file_operations(turns):
         if success:
@@ -130,8 +131,11 @@ def _json_lines(path):
 
 
 def _save_json(path, data):
+    _save_bytes(path, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+def _save_bytes(path, encoded):
     path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     if path.is_file() and path.read_bytes() == encoded:
         return
     temp = path.with_name(f".{path.name}.{uuid4().hex}")
@@ -343,18 +347,80 @@ def _learn_records(case, latest=None):
     return records
 
 
+def library_text(directory):
+    path = directory / "lessons.md" if directory else None
+    return path.read_text(encoding="utf-8-sig") if path and path.is_file() else ""
+
+
+def proposal_prompt(case, library):
+    cfg = _settings(case)
+    output = case.resolve() / "out"
+    book = (output / cfg["xlsx_file"]).resolve()
+    if book.parent != output:
+        sys.exit("The answered workbook must be inside the case output directory.")
+    rows = _sheet_rows(book, cfg)
+    skills = sorted(p.name for p in files("reportagent.skills").iterdir() if p.joinpath("SKILL.md").is_file())
+    parts = ["Propose lessons for owner review and save /work/learn/proposals.md.",
+             "Available skills: " + ", ".join(skills), "Current lesson library:\n" + library_text(library),
+             "Client workbook: " + cfg["xlsx_file"]]
+    for row in rows:
+        if any(row.values()):
+            parts.append(f"Q{row.get('number') or '?'}\nQuestion: {row.get('question', row.get('content', ''))}\n"
+                         f"Basis: {row.get('sources', '')}\nImpact: {row.get('effect', '')}\nAnswer: {row.get('answer', '')}")
+    return "\n\n".join(parts)
+
+
+def adopt(case, directory):
+    proposals = (case / "work/learn/proposals.md").read_text(encoding="utf-8-sig")
+    selected = []
+    for block in re.split(r"(?m)^---[ \t]*$", proposals):
+        status = re.findall(r"(?m)^status:[ \t]*(\S+)[ \t]*$", block)
+        kind = re.findall(r"(?m)^kind:[ \t]*(\S+)[ \t]*$", block)
+        if status in (["adopted"], ["edited"]) and len(kind) == 1 and kind[0] in ("FIXED", "DEFAULT", "GENERAL", "ASKING"):
+            selected.append(f"case: {case.name}\n" + block.strip())
+    directory = directory.resolve()
+    if any((root / ".git").exists() and directory.is_relative_to(root) for root in Path(__file__).resolve().parents):
+        sys.exit("Choose a lesson library outside the report-agent repository.")
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / "lessons.md"
+    with (directory / ".adopt.lock").open("a+b") as lock:
+        if os.name == "posix":
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            import msvcrt
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        previous = target.read_bytes() if target.exists() else b""
+        history = previous.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+        seen = {s.strip().partition("\n")[2] for s in history.split("\n---\n")}
+        new = [key for key in dict.fromkeys(selected) if key not in seen]
+        if new:
+            date = datetime.now(timezone.utc).date()
+            addition = "".join(f"\n---\ndate: {date}\n{key}\n" for key in new)
+            _save_bytes(target, previous + addition.encode())
+    print(f"Adopted {len(new)} lesson blocks into {target}.")
+
+
 def add_parser(commands):
     learn = commands.add_parser("learn", help="record offline run signals and owner feedback")
     actions = learn.add_subparsers(dest="action", required=True)
-    for action in ("signals", "summary", "feedback"):
+    for action in ("signals", "summary", "feedback", "propose", "adopt"):
         item = actions.add_parser(action)
         item.add_argument("--case", type=Path, required=True)
+        if action in ("propose", "adopt"):
+            item.add_argument("--library", type=Path, required=action == "adopt")
+        if action == "propose":
+            item.add_argument("--max-tokens", type=int, required=True)
+            item.add_argument("--preflight", action="store_true", help="estimate three requests offline")
         if action == "feedback":
             item.add_argument("--input", type=Path, required=True, help="owner feedback JSON")
 
 
 def command(args):
     case = args.case.resolve()
+    if args.action == "adopt":
+        return adopt(case, args.library)
     if args.action == "feedback":
         event = json.loads(args.input.read_text(encoding="utf-8"))
         fields = ["run_id", "section", "date", "source", "owner_reason"]

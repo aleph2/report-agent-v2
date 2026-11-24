@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_HALF_UP
 from importlib.resources import files
 from pathlib import Path
+import re
 from shutil import copytree
 from typing import Annotated, NotRequired
 
@@ -58,7 +59,8 @@ class PhaseTools(AgentMiddleware):
         self.case = case.resolve()
         self.supplied = supplied_files
         self.review_phase = phase in ("verify-sources", "review")
-        self.target = None
+        self.learning = phase == "learn"
+        self.target = self.case / "work/learn/proposals.md" if self.learning else None
         if self.review_phase and section and Path(section).name == section:
             suffix = "-sources.md" if phase == "verify-sources" else ".md"
             self.target = self.case / "work/reviews" / (section + suffix)
@@ -93,18 +95,27 @@ class PhaseTools(AgentMiddleware):
                 return None
             if self.supplied:
                 message += " " + supplied_notice(self.supplied)
-        if call["name"] == self.action and (not self.review_phase or path == self.target):
+        if call["name"] == self.action and ((self.target is None and not self.review_phase) or path == self.target):
             return None
         return ToolMessage(content=message, tool_call_id=call["id"], status="error")
 
+    def _proposal_status(self, request):
+        call = request.tool_call
+        if self.learning and call["name"] == "write_file" and isinstance(call["args"].get("content"), str):
+            # A model can propose a lesson; only a subsequent human edit marks it for adoption.
+            body = call["args"]["content"].replace("\r\n", "\n").replace("\r", "\n")
+            body = re.sub(r"(?m)^status:[^\n]*", "status: proposed", body)
+            return request.override(tool_call={**call, "args": {**call["args"], "content": body}})
+        return request
+
     def wrap_tool_call(self, request, handler):
-        return self._denied(request.tool_call) or handler(request)
+        return self._denied(request.tool_call) or handler(self._proposal_status(request))
 
     async def awrap_tool_call(self, request, handler):
-        return self._denied(request.tool_call) or await handler(request)
+        return self._denied(request.tool_call) or await handler(self._proposal_status(request))
 
 
-PHASE_SKILLS = {"verify-sources": "verify-sources", "review": "review-section",
+PHASE_SKILLS = {"learn": "learn-from-answers", "verify-sources": "verify-sources", "review": "review-section",
                 "clarify": "clarify-section", "revise": "write-section"}
 
 

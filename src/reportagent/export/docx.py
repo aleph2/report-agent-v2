@@ -284,9 +284,7 @@ def _anchor(paragraphs, sentence, heading):
     return [r for r in heading.runs if r.text] or [heading.add_run("\u200b")], heading.text
 
 
-def _old_answers(target, cfg):
-    if not target.exists():
-        return {}
+def _sheet_rows(target, cfg):
     ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with ZipFile(target) as archive:
         shared = ["".join(e.itertext()) for e in fromstring(archive.read("xl/sharedStrings.xml"))] if "xl/sharedStrings.xml" in archive.namelist() else []
@@ -302,13 +300,22 @@ def _old_answers(target, cfg):
                     value = "".join(t.text or "" for t in cell.findall(".//s:t", ns))
                 values[re.sub(r"\d", "", cell.get("r"))] = value
             rows.append(values)
-    labels = dict(zip(cfg["sheet_fields"].split("|"), cfg["sheet_columns"].split("|")))
-    columns = {field: next((col for col, label in rows[0].items() if label == labels.get(field)), None) for field in ("number", "status", "answer", "responder")}
-    numbered = [(int(row[columns["number"]]), row) for row in rows[1:] if row.get(columns["number"])]
+    fields = dict(zip(cfg["sheet_columns"].split("|"), cfg["sheet_fields"].split("|")))
+    columns = {}
+    for col, label in (rows[0] if rows else {}).items():
+        if label in fields:
+            columns.setdefault(fields[label], col)
+    return [{field: row.get(col, "") for field, col in columns.items()} for row in rows[1:]]
+
+
+def _old_answers(target, cfg):
+    if not target.exists():
+        return {}
+    numbered = [(int(row["number"]), row) for row in _sheet_rows(target, cfg) if row.get("number")]
     counts = Counter(number for number, _ in numbered)
-    return {number: [row.get(columns[field], "") for field in ("status", "answer", "responder")]
+    return {number: [row.get(field, "") for field in ("status", "answer", "responder")]
             for number, row in numbered if counts[number] == 1
-            and row.get(columns["status"]) != cfg["item_conflict_status"]}
+            and row.get("status") != cfg["item_conflict_status"]}
 
 
 def _xlsx(target, headers, rows, cfg):
