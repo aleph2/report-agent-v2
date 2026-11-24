@@ -838,14 +838,14 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
             return int(remaining * GATHER_BUDGET_FRACTION)
         return min(remaining, overrides.get(phase, REVISION_CAPS.get(phase, remaining)))
 
-    lessons = learn.library_text(library) if stage == "stage1" else ""
+    lessons = learn.library_text(library)
     limits = " ".join(f"{phase}={phase_limit(phase, cap)}" for phase in selected)
     record("-", stage, 0, "start", f"max-tokens={cap} {limits}")
 
     def run_phase(name, phase, prompt, extra=""):
         limit = phase_limit(phase, cap - total)
         messages = _phase_messages(case, name, phase, prompt)
-        if lessons and phase in ("plan", "gather", "write", "clarify"):
+        if lessons and phase in ("plan", "gather", "write", "clarify", "revise"):
             messages[0].content += "\n\nOwner-adopted lessons for reference:\n" + lessons
             if phase == "clarify":
                 messages[0].content += "\nAsk the client to confirm applicable DEFAULT lessons for this case."
