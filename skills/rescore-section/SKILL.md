@@ -8,6 +8,7 @@ Only method rules transfer between slopes (how to choose a source, how to comput
 
 Save the assigned .table.md only. Use the supplied table, applicability and scoring notes, evidence notes, answered questions and adopted lessons. Read the cited source pages or page images if needed. Apply general client methods across slopes. A site-specific measurement, missing drawing or expected grade belongs to the identified slope. Cite the applicable page or numbered answer in each row. Keep unknown inputs and assumptions explicit.
 
+Before measuring, read the text of the slope's own cross-section page (page-NNN.txt) for a stated natural slope angle.
 For X12, measure the natural ground angle α₀ on the slope's own cross-section with measure_profile, choosing the toe and crest of the natural ground yourself, and cite the page, layer, endpoints, H₀, L₀ and α₀.
 If the drawings or design notes state this slope's natural slope angle as a range, use its lower bound as α₀ so that the risk is not underestimated, cite it, and report the measure_profile result beside it as a check; if they state only a maximum or no angle, use the measured α₀ and cite the stated maximum beside it.
 

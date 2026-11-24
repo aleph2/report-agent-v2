@@ -63,6 +63,7 @@ class TokenCapState(AgentState):
     usage_missing: NotRequired[bool]
     budget_note_sent: NotRequired[bool]
     final_save_rule: NotRequired[str]
+    final_calculation_used: NotRequired[bool]
 
 
 class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
@@ -85,12 +86,14 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
                 log.write(json.dumps(dict(request=self.request_number, **fields)) + "\n")
 
     def _prepare(self, request):
-        # Price the usual tool set conservatively even when the final request offers only a save.
+        # Price the usual tool set conservatively even on a restricted final request.
         tools = request.tools
         if request.state.get("final_save_rule"):
             saves = ("edit_file",) if self.phase in ("revise", "sync") else ("write_file",)
             if self.phase == "rescore":
                 saves = ("write_file", "edit_file")
+                if not request.state.get("final_calculation_used"):
+                    saves += ("calculate_score",)
             request = request.override(tools=[tool for tool in request.tools if getattr(tool, "name", None) in saves])
         if not (self.info or self.guard):
             return request
@@ -171,16 +174,24 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
     def before_model(self, state, runtime):
         total = state.get("total_tokens", 0)
         if state.get("final_save_rule"):
+            last = state["messages"][-1]
+            if (self.phase == "rescore" and not state.get("final_calculation_used") and total < self.max_tokens
+                    and isinstance(last, ToolMessage) and last.name == "calculate_score" and last.status == "success"):
+                # The model needs to see the tool result before it can save those numbers.
+                return {"final_calculation_used": True}
             return {"jump_to": "end"}
         if total >= self.max_tokens:
             return self._end(total)
         previous = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
         last_input = (previous.usage_metadata or {}).get("input_tokens") if previous else None
         if last_input is not None and self.max_tokens - total < 2 * (last_input + self.output_reserve):
+            notice = "This is the last response this phase can make; save your file now. "
             if self.phase in ("revise", "sync"):
                 save = f"In the {self.phase} phase, make all remaining edits now, as separate edit_file calls in this one response."
             elif self.phase == "rescore":
-                save = "Save the calculated table now with write_file, or edit_file if it exists."
+                notice = "Finish the scoring table now. "
+                save = ("If you still need results, call calculate_score with all baseline and scenario inputs, "
+                        "then save its results with write_file or edit_file if the budget permits.")
             elif self.phase == "clarify":
                 save = ("In the clarify phase, use write_file to save the complete official clarification file now. "
                         "Keep every existing item and its number, except an evidenced collision renumbering. "
@@ -192,7 +203,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
             if self.info:
                 save += f" Remaining allowance: {self.max_tokens - total} tokens."
             return {"final_save_rule": "remaining < 2 * (previous input + output reserve)", "messages": [HumanMessage(
-                content="This is the last response this phase can make; save your file now. " + save
+                content=notice + save
             )]}
         # Keep pending tool calls and their results together before adding the note.
         if self.remind and total >= self.max_tokens / 2 and not state.get("budget_note_sent"):
