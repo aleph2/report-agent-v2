@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 from pydantic import Field
 
+from .ingest import profile_data
 from .models import PHASE_SETTINGS
 
 
@@ -51,6 +52,21 @@ def calculate_score(scores: dict[str, Score], weights: dict[str, Weight],
     return {"base": evaluate(scores), "scenarios": [evaluate(scores | overrides) for overrides in scenarios]}
 
 
+def _profile_tools(case):
+    @tool
+    def list_profile_layers(file: str, page: int) -> dict:
+        """List vector layers on a one-based page of an original /sources/ PDF, with metric extents and axis ticks."""
+        return profile_data(case, file, page)
+
+    @tool
+    def measure_profile(file: str, page: int, x_from: float, x_to: float, layer: str = "dmx") -> dict:
+        """Measure a vector ground profile from toe to crest on a one-based PDF page. Supply signed horizontal
+        offsets in metres using list_profile_layers. Returns signed rise, horizontal run, angle and calibration."""
+        return profile_data(case, file, page, layer, (x_from, x_to))
+
+    return [list_profile_layers, measure_profile]
+
+
 def supplied_notice(paths):
     return "Files already included in your first message: " + ", ".join("/" + path for path in paths)
 
@@ -58,6 +74,7 @@ def supplied_notice(paths):
 class PhaseTools(AgentMiddleware):
     def __init__(self, phase, policy, case, section, supplied_files):
         self.score_tool = ("calculate_score",) if phase in SCORE_PHASES else ()
+        self.profile_tools = ("list_profile_layers", "measure_profile") if phase == "rescore" else ()
         self.action = "edit_file" if phase in ("revise", "sync") else "write_file"
         self.two_step = phase in ("rescore", "sync")
         self.actions = (self.action, "edit_file") if phase == "rescore" else (self.action,)
@@ -80,7 +97,7 @@ class PhaseTools(AgentMiddleware):
 
     def _model_request(self, request):
         if self.policy == "restricted":
-            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in ("read_file", *self.actions, *self.score_tool)])
+            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in ("read_file", *self.actions, *self.score_tool, *self.profile_tools)])
         if any(isinstance(m, AIMessage) for m in request.messages):
             return request
         # Bailian accepts a named choice only with thinking disabled on this request.
@@ -98,7 +115,7 @@ class PhaseTools(AgentMiddleware):
     def _denied(self, call):
         if self.policy != "restricted":
             return None
-        if call["name"] in self.score_tool:
+        if call["name"] in (*self.score_tool, *self.profile_tools):
             return None
         relative = call["args"].get("file_path", "").lstrip("/")
         path = (self.case / relative).resolve()
@@ -173,7 +190,7 @@ def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None
     backend = FilesystemBackend(root_dir=case_dir, virtual_mode=True)
     skills = ["/work/skills/"]
     prompt = "You work on this report using the files in this case. Follow the available skills and save your work as case files."
-    if phase:
+    if phase in PHASE_SKILLS:
         skill = PHASE_SKILLS[phase]
         prompt = files("reportagent.skills").joinpath(skill, "SKILL.md").read_text(encoding="utf-8")
         skills = None
@@ -184,8 +201,11 @@ def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None
     policy = PHASE_SETTINGS.get(phase, {}).get("tool_policy")
     if policy == "restricted" or (phase in ("clarify", "revise") and policy == "force-first"):
         middleware = [PhaseTools(phase, policy, case_dir, section, supplied_files), *middleware]
+    tools = [calculate_score] if phase in SCORE_PHASES else []
+    if phase in ("gather", "rescore"):
+        tools.extend(_profile_tools(case_dir))
     return create_deep_agent(
-        model=model, tools=[calculate_score] if phase in SCORE_PHASES else [],
+        model=model, tools=tools,
         middleware=[RevisionEdits(), *middleware] if phase in ("revise", "sync") else middleware,
         checkpointer=checkpointer,
         backend=backend, skills=skills,

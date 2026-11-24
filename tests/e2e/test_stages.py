@@ -283,7 +283,7 @@ def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, cap
     assert phases == ["rescore", "sync"]
     progress = (work / "runs/progress.txt").read_text()
     last_line = len(body.read_text().splitlines())
-    assert "rescore=165000 sync=150000" in progress
+    assert "rescore=167000 sync=150000" in progress
     assert f"line {last_line}" in progress and "\tunfinished\t" in progress and f"line {last_line}" in capsys.readouterr().out
     assert not (case / ".stage2-complete").exists()
     def first(phase):

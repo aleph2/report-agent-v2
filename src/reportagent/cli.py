@@ -749,7 +749,7 @@ def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=N
     try:
         model = make_model(phase)
         agent = build_agent(case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
-                            phase=phase if phase in PHASE_SKILLS else None, section=section,
+                            phase=phase, section=section,
                             supplied_files=messages[0].response_metadata.get("supplied_files", ()))
         # Flush each checkpoint before advancing; avoids queued background writes.
         try:
@@ -1041,7 +1041,7 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
     def phase_limit(phase, remaining):
         if phase == "gather" and phase not in overrides:
             return int(remaining * GATHER_BUDGET_FRACTION)
-        default = {"rescore": 165000, "sync": 150000}.get(phase, REVISION_CAPS.get(phase, remaining))
+        default = {"rescore": 167000, "sync": 150000}.get(phase, REVISION_CAPS.get(phase, remaining))
         return min(remaining, overrides.get(phase, default))
 
     lessons = learn.library_text(library)
