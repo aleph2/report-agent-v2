@@ -26,7 +26,14 @@ def test_packaged_revise_skill_requires_cross_slope_rules():
     )
     lines = skill.splitlines()
     table_first = next(i for i, line in enumerate(lines) if line.startswith("When client answers change an indicator,"))
-    assert lines[table_first + 1] == rule
+    limits = [
+        "An answer that states an expected score or grade for a slope is never a scoring rule; do not use it in any row.",
+        "Only method rules transfer between slopes (how to choose a source, how to compute, which assumption to use when data are missing). Facts about another slope's site, drawings or joints never transfer.",
+    ]
+    assert lines[table_first + 1:table_first + 4] == [*limits, rule]
+    for phase in ("rescore", "sync"):
+        text = files("reportagent.skills").joinpath(cli.PHASE_SKILLS[phase], "SKILL.md").read_text(encoding="utf-8")
+        assert "\n".join(limits) in text
 
 
 def test_two_stages(tmp_path, monkeypatch, capsys):
@@ -225,3 +232,97 @@ def test_stage_section_selection(tmp_path, monkeypatch, capsys):
         run(tmp_path, stage, 100, monkeypatch, "--section", "B")
         assert calls[-1] == (phase, "B", 0)
     assert (tmp_path / ".stage2-complete").is_file()
+
+
+def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, capsys):
+    from decimal import Decimal
+    case = tmp_path
+    work = case / "work"
+    sections = work / "sections"
+    sections.mkdir(parents=True)
+    (work / "plan.md").write_text("## A\n")
+    notes = work / "notes"
+    notes.mkdir()
+    (notes / "A.md").write_text("Evidence sentinel")
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "lessons.md").write_text("Library sentinel")
+    ids = "11 12 21 22 23 31 32 41 42 51 52".split()
+    weights = dict(zip(("X" + k for k in ids), [".17",".14",".16",".12",".04",".09",".07",".11",".06",".03",".01"]))
+    scores = dict.fromkeys(weights, "40")
+    rows = ["| 指标 | 档位 | 基本分值范围 | Rij | γij | Xij | 取值说明 |", "|---|---|---|---|---|---|---|"]
+    for key, value in weights.items():
+        rows.append(f"| {key} | B | 25–49 | 40 | {value} | {40 * Decimal(value):.2f} | [合成资料, page 1] |")
+    table = "\n".join(rows) + "\n\n基准 F=40.00，Ⅱ级。"
+    old = table.replace("40.00，Ⅱ级", "55.00，Ⅲ级")
+    body = sections / "A.md"
+    body.write_text("# A\n\nPrivate prose sentinel\n\n## 适用性\n适用行 sentinel\n\n## 评分\n" + old + "\n\n本坡为Ⅲ级。")
+    commission = case / "commission"
+    commission.mkdir()
+    (commission / "澄清答复.md").write_text("Case-only answer")
+    cfg = _settings(case)
+    out = case / "out"
+    out.mkdir()
+    _xlsx(out / cfg["xlsx_file"], cfg["sheet_columns"].split("|"),
+          [[7, "Elsewhere", "", "Q?", "", "Open", "Numbered answer", "Client"]], cfg)
+    phases = []
+    end = AIMessage(content="Saved.", usage_metadata=dict(input_tokens=15, output_tokens=2, total_tokens=17))
+    def fake(phase):
+        phases.append(phase)
+        if phase == "rescore":
+            ops = [call("calculate_score", scores=scores, weights=weights, include_products=True),
+                   call("write_file", file_path="/work/sections/A.table.md", content=table)]
+        elif phase == "sync":
+            before, after = (old, table) if phases.count("sync") == 1 else ("本坡为Ⅲ级。", "本坡为Ⅱ级。")
+            ops = [call("edit_file", file_path="/work/sections/A.md", old_string=before, new_string=after)]
+        else:
+            raise AssertionError(phase)
+        return ScriptedModel(responses=[m.model_copy(update={"usage_metadata": end.usage_metadata}) for m in ops] + [end])
+    monkeypatch.setattr(cli, "make_model", fake)
+    run(case, "stage2", 300000, monkeypatch, "--library", str(library))
+    assert phases == ["rescore", "sync"]
+    progress = (work / "runs/progress.txt").read_text()
+    last_line = len(body.read_text().splitlines())
+    assert "rescore=165000 sync=150000" in progress
+    assert f"line {last_line}" in progress and "\tunfinished\t" in progress and f"line {last_line}" in capsys.readouterr().out
+    assert not (case / ".stage2-complete").exists()
+    def first(phase):
+        path, = (work / "runs").glob("*-" + phase + ".jsonl")
+        return json.loads(path.read_text().splitlines()[0])["content"]
+    assert all(v in first("rescore") for v in ("适用行 sentinel", "Evidence sentinel", "Library sentinel", "7: Numbered answer", "section: Elsewhere", "Q?"))
+    assert "Private prose sentinel" not in first("rescore")
+    assert "Private prose sentinel" in first("sync") and table in first("sync")
+    assert all(v not in first("sync") for v in ("Evidence sentinel", "Library sentinel", "7: Numbered answer"))
+    run(case, "stage2", 300000, monkeypatch, "--library", str(library))
+    assert phases == ["rescore", "sync", "sync"] and (case / ".stage2-complete").is_file()
+    run(case, "stage2", 300000, monkeypatch, "--library", str(library))
+    assert phases == ["rescore", "sync", "sync"]
+
+
+def test_table_gate_product_weight_boundary_scenarios_and_scope(tmp_path):
+    rows = ["| 指标 | 档位 | 基本分值范围 | Rij | γij | Xij | 取值说明 |", "|---|---|---|---|---|---|---|"]
+    for i, k in enumerate(cli._SCORE_IDS):
+        rows.append(f"| {k} | B | 25–49 | {30.001 if i == 0 else 30} | {'.50' if i == 0 else '.05'} | {15 if i == 0 else 1.5} | evidence |")
+    text = "\n".join(rows) + "\n基准 F=30.00，Ⅱ级。\n情景[低] R11=29，F=29.50，Ⅰ级。"
+    assert cli._table_gate(text) == []
+    for modified, error in [(text.replace("| 15 |", "| 14.9 |"), "weighted X"),
+                            (text.replace(".05 | 1.5", ".04 | 1.2", 1), "weights sum"),
+                            (text.replace("X52", "X51"), "duplicate"),
+                            (text.replace("29.50", "30.00"), "低 F="),
+                            (text + "\n本坡维持Ⅲ级。", "baseline F="),
+                            (text + "\nF=ΣX=31.15，Ⅱ级。", "baseline F="),
+                            (text.replace("30.00，Ⅱ", "30.00，Ⅰ"), "baseline F=")]:
+        assert any(error in line for line in cli._table_gate(modified)), (error, modified)
+    assert cli._table_gate(text + "\n情景[低] F=29.50，Ⅰ级。", text) == []
+    assert cli._table_gate(text.replace("evidence", "different", 1), text)
+    assert cli._table_gate(text, calculations=[])
+    from reportagent.agent import PhaseTools
+    for phase, target in [("rescore", "A.table.md"), ("sync", "A.md")]:
+        middleware = PhaseTools(phase, "restricted", tmp_path, "A", ())
+        def denied(tool, path):
+            return middleware._denied({"id":"test", "name":tool, "args":{"file_path": path}})
+        assert denied("edit_file", "/work/sections/" + target) is None
+        assert denied("edit_file", "/work/sections/B.md").status == "error"
+        assert denied("read_file", "/commission/unrelated.txt").status == "error"
+        assert (denied("read_file", "/sources/a/page.png") is None) == (phase == "rescore")
+        assert (denied("calculate_score", "") is None) == (phase == "rescore")

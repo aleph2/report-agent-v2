@@ -18,7 +18,7 @@ from .models import PHASE_SETTINGS
 
 Score = Annotated[Decimal, Field(ge=0, le=100)]
 Weight = Annotated[Decimal, Field(ge=0, le=1)]
-SCORE_PHASES = ("review", "revise", "clarify")
+SCORE_PHASES = ("review", "revise", "clarify", "rescore")
 
 
 def score_result(total):
@@ -30,10 +30,10 @@ def score_result(total):
 
 @tool
 def calculate_score(scores: dict[str, Score], weights: dict[str, Weight],
-                    scenarios: list[dict[str, Score]] | None = None) -> dict:
+                    scenarios: list[dict[str, Score]] | None = None, include_products: bool = False) -> dict:
     """Compute base F = sum(score * weight) and grade. Use identical indicator IDs and fractional weights; weights are used as supplied.
     Each scenario overrides only named base scores; results follow input order. Grade uses unrounded F.
-    To calculate a range, supply its lower and upper endpoint scenarios.
+    To calculate a range, supply its lower and upper endpoint scenarios. include_products returns each weighted Xij rounded to two decimals.
     """
     if not scores or scores.keys() != weights.keys():
         return {"error": "Supply the same nonempty set of indicator IDs for scores and weights."}
@@ -42,7 +42,11 @@ def calculate_score(scores: dict[str, Score], weights: dict[str, Weight],
         return {"error": "A scenario may override only indicators in the base scores."}
 
     def evaluate(values):
-        return score_result(sum(values[key] * weight for key, weight in weights.items()))
+        products = {key: values[key] * weight for key, weight in weights.items()}
+        result = score_result(sum(products.values()))
+        if include_products:
+            result["Xij"] = {key: str(x.quantize(Decimal(".01"), rounding=ROUND_HALF_UP)) for key, x in products.items()}
+        return result
 
     return {"base": evaluate(scores), "scenarios": [evaluate(scores | overrides) for overrides in scenarios]}
 
@@ -54,7 +58,10 @@ def supplied_notice(paths):
 class PhaseTools(AgentMiddleware):
     def __init__(self, phase, policy, case, section, supplied_files):
         self.score_tool = ("calculate_score",) if phase in SCORE_PHASES else ()
-        self.action = "edit_file" if phase == "revise" else "write_file"
+        self.action = "edit_file" if phase in ("revise", "sync") else "write_file"
+        self.two_step = phase in ("rescore", "sync")
+        self.actions = (self.action, "edit_file") if phase == "rescore" else (self.action,)
+        self.readable = set()
         self.policy = policy
         self.case = case.resolve()
         self.supplied = supplied_files
@@ -65,9 +72,15 @@ class PhaseTools(AgentMiddleware):
             suffix = "-sources.md" if phase == "verify-sources" else ".md"
             self.target = self.case / "work/reviews" / (section + suffix)
 
+        if self.two_step and section and Path(section).name == section:
+            body = self.case / "work/sections" / (section + ".md")
+            table = body.with_suffix(".table.md")
+            self.target = table if phase == "rescore" else body
+            self.readable = {table, self.case / "work/notes" / body.name} if phase == "rescore" else {table, body}
+
     def _model_request(self, request):
         if self.policy == "restricted":
-            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in ("read_file", self.action, *self.score_tool)])
+            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in ("read_file", *self.actions, *self.score_tool)])
         if any(isinstance(m, AIMessage) for m in request.messages):
             return request
         # Bailian accepts a named choice only with thinking disabled on this request.
@@ -90,6 +103,13 @@ class PhaseTools(AgentMiddleware):
         relative = call["args"].get("file_path", "").lstrip("/")
         path = (self.case / relative).resolve()
         message = "This phase may read /sources/ pages (find them in /index.md) and save its own file."
+        if self.two_step:
+            if call["name"] in self.actions and path == self.target:
+                return None
+            if call["name"] == "read_file" and (path in self.readable or
+                    (self.score_tool and (path.is_relative_to(self.case / "sources") or path == self.case / "index.md"))):
+                return None
+            return ToolMessage(content="This phase allows only its assigned files and tools.", tool_call_id=call["id"], status="error")
         if call["name"] == "read_file":
             if path.is_relative_to(self.case / "sources") or (relative == "index.md" and path == self.case / "index.md"):
                 return None
@@ -115,7 +135,7 @@ class PhaseTools(AgentMiddleware):
         return self._denied(request.tool_call) or await handler(self._proposal_status(request))
 
 
-PHASE_SKILLS = {"learn": "learn-from-answers", "verify-sources": "verify-sources", "review": "review-section",
+PHASE_SKILLS = {"rescore": "rescore-section", "sync": "sync-section", "learn": "learn-from-answers", "verify-sources": "verify-sources", "review": "review-section",
                 "clarify": "clarify-section", "revise": "write-section"}
 
 
@@ -166,7 +186,7 @@ def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None
         middleware = [PhaseTools(phase, policy, case_dir, section, supplied_files), *middleware]
     return create_deep_agent(
         model=model, tools=[calculate_score] if phase in SCORE_PHASES else [],
-        middleware=[RevisionEdits(), *middleware] if phase == "revise" else middleware,
+        middleware=[RevisionEdits(), *middleware] if phase in ("revise", "sync") else middleware,
         checkpointer=checkpointer,
         backend=backend, skills=skills,
         system_prompt=prompt,

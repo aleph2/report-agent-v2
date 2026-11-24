@@ -217,7 +217,7 @@ def _plan(case, *, use_headings=False):
     if not order and use_headings:
         order = [(1, h.strip()) for h in re.findall(r"^##[ \t]+(.+)$", text, re.M)]
     elif not order:
-        order = [(1, p.stem) for p in sorted((case / "work/sections").glob("*.md"))]
+        order = [(1, p.stem) for p in sorted((case / "work/sections").glob("*.md")) if not p.name.endswith(".table.md")]
     return metadata, order
 
 
@@ -310,13 +310,16 @@ def _sheet_rows(target, cfg, sheet_path="xl/worksheets/sheet1.xml"):
     return [{field: row.get(col, "") for field, col in columns.items()} for row in rows[1:]]
 
 
+def answered_client_rows(target, cfg):
+    if target.is_file():
+        with ZipFile(target) as book:
+            sheets = [name for name in book.namelist() if re.fullmatch(r"xl/worksheets/[^/]+\.xml", name)]
+        for sheet in sheets:
+            yield from (row for row in _sheet_rows(target, cfg, sheet) if row.get("answer", "").strip())
+
+
 def _missing_client_answers(target, cfg, selected):
-    if not target.is_file():
-        return 0
-    with ZipFile(target) as book:
-        sheets = [name for name in book.namelist() if re.fullmatch(r"xl/worksheets/[^/]+\.xml", name)]
-    previous = Counter(row.get("number", "").strip() for sheet in sheets for row in _sheet_rows(target, cfg, sheet)
-                       if row.get("answer", "").strip())
+    previous = Counter(row.get("number", "").strip() for row in answered_client_rows(target, cfg))
     proposed = Counter(str(item["number"]) for item in selected if item.get("answer", "").strip())
     return sum((previous - proposed).values())
 
