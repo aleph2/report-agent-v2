@@ -656,6 +656,12 @@
             <section class="card">
               <div class="card-head"><h2>案件文件</h2></div>
               <div id="files"></div>
+              <form class="answer-form" id="fixedForm">
+                <div class="field"><label for="project">项目名称</label><input id="project" name="project" /></div>
+                <div class="field"><label for="count">评估对象处数</label><input id="count" name="count" inputmode="numeric" /></div>
+                <button id="fixedSave" disabled>保存固定文本填项</button>
+                <output id="fixedStatus" aria-live="polite"></output>
+              </form>
               <form class="answer-form" id="answers">
                 <label for="sheet">上传已答复的客户清单</label>
                 <div class="upload-row">
@@ -742,6 +748,7 @@
         return (key === 'max-tokens' ? '总上限' : phaseName(key)) + ' ' + fmt(value)
       }).join(' · ')
       const errorText = (err) => /[一-龥]/.test(err.message) ? err.message : '请求失败，请检查本机服务后重试。'
+      let fixedCase = '', fixedDirty = false, fixedSaving = ''
       let lastGuide = ''
       let selected = new URLSearchParams(location.search).get('case'),
         stage = 'stage1',
@@ -772,6 +779,7 @@
       }
       function choose(name) {
         selected = name
+        el('fixedSave').disabled = true
         el('runform').reset()
         el('answers').reset()
         el('notice').textContent = ''
@@ -791,6 +799,15 @@
         }
       }
       function render(data) {
+        if (fixedCase !== data.name) {
+          fixedCase = data.name
+          fixedDirty = false
+          el('fixedStatus').textContent = ''
+        }
+        if (!fixedDirty) [el('project').value, el('count').value] = data.fixed_values
+        for (const id of ['project', 'count', 'fixedSave']) {
+          el(id).disabled = !!data.running || fixedSaving === fixedCase
+        }
         el('name').textContent = data.name
         Array.from(el('guide').children).forEach((item, index) => {
           if (index + 1 === data.step) item.setAttribute('aria-current', 'step')
@@ -997,6 +1014,31 @@
         } finally {
           sendingFiles = false
           for (const id of [...inputs, 'createSubmit', 'cancel', 'caseName']) el(id).disabled = false
+        }
+      }
+      el('fixedForm').oninput = () => {
+        fixedDirty = true
+        el('fixedStatus').textContent = ''
+      }
+      el('fixedForm').onsubmit = async (e) => {
+        e.preventDefault()
+        const name = selected
+        if (fixedCase !== name || fixedSaving) return
+        const form = new FormData(e.target)
+        form.set('case', name)
+        fixedSaving = name
+        for (const id of ['project', 'count', 'fixedSave']) el(id).disabled = true
+        try {
+          await api('/fixed-values', form)
+          if (selected === name) {
+            fixedDirty = false
+            el('fixedStatus').textContent = '已保存'
+          }
+        } catch (err) {
+          if (selected === name) el('fixedStatus').textContent = errorText(err)
+        } finally {
+          fixedSaving = ''
+          await refresh()
         }
       }
       el('runform').onsubmit = async (e) => {
