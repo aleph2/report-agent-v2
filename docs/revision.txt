@@ -1,3 +1,22 @@
+Running a whole case in two stages
+
+  python -m reportagent stage1 CASE --max-tokens 300000 --phase-cap clarify=60000
+  python -m reportagent stage2 CASE --max-tokens 300000 --phase-cap revise=220000
+
+Stage 1 ingests and plans the case, then runs gather, write, verify-sources,
+review and clarify for each section before exporting the draft and client sheet.
+For stage 2, put the answered workbook back in CASE/out/<xlsx_file> with its
+original headers and question numbers. Numbered text answers in cfg.answers_file
+take precedence for the same question. Stage 2 revises each section and exports.
+
+Each invocation has one shared --max-tokens allowance. Repeat --phase-cap NAME=N
+for distinct model phases in that stage. Each override replaces the phase default
+in every section, up to the remaining allowance. Plan and write default to the
+remaining allowance and gather defaults to 60% of it. The four revision defaults
+are listed below. The first line of each invocation in work/runs/progress.txt and
+stdout lists the shared cap and effective phase limits at the start. The allowance
+is recalculated before each phase. A restart skips completed work on disk.
+
 Revision of one existing section
 
 First refresh its mechanical source-page list (offline):

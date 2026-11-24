@@ -24,7 +24,7 @@ from langsmith import tracing_context
 from . import learn
 from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
 from .budget import TokenCapMiddleware, estimate_input
-from .export.docx import _SCENARIO, _VALUE, _risk_statements, clarification_numbers, export_docx, section_flags
+from .export.docx import _SCENARIO, _VALUE, _plan, _risk_statements, _settings, export_answers, clarification_numbers, export_docx, section_flags
 from .ingest import ingest
 from .models import PHASE_SETTINGS, make_model
 
@@ -713,13 +713,182 @@ def _replay(case, phases, historical_input, section, receipt=None):
             print(json.dumps(result, ensure_ascii=False))
 
 
+PLAN_PROMPT = "Plan the report requested in /commission/."
+
+
+def _section_phases(name):
+    requirements = f"Its required contents are under heading ## {name} in /work/plan.md."
+    return (
+        ("gather", f"Gather evidence for section {name} requested in /commission/. "
+         f"{requirements} Save evidence notes to /work/notes/{name}.md."),
+        ("write", f"Write section {name}. {requirements} "
+         f"Use the evidence notes in /work/notes/{name}.md. "
+         f"Save the section to /work/sections/{name}.md."),
+    )
+
+
+def _phase_messages(case, name, phase, prompt):
+    messages = (_revision_messages(case, name, phase, prompt) if phase in REVISION_CAPS
+                else [HumanMessage(content=prompt)])
+    first = messages[0]
+    if supplied := first.response_metadata.get("supplied_files"):
+        notice = supplied_notice(supplied)
+        first.content = ([{"type": "text", "text": notice}, *first.content] if isinstance(first.content, list)
+                         else notice + "\n\n" + first.content)
+    return messages
+
+
+def _updated_in_place(log, target, phase):
+    # The draft and preliminary questions can exist before their final phase starts.
+    messages = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    operations = [ok for _, call, ok in learn.file_operations(learn.recorded_turns(messages))
+                  if call["args"].get("file_path", "").lstrip("/") == target]
+    if phase == "clarify":
+        return bool(operations) and all(operations)
+    # A clean no-edit decision is possible; a budget stop after a partial edit is unfinished.
+    last = messages[-1]
+    return (last.get("type") == "ai" and not last.get("tool_calls") and bool(last.get("usage_metadata"))
+            and not last.get("response_metadata", {}).get("budget_stop") and all(operations))
+
+
+def _phase_overrides(specs, selected, parser):
+    overrides = {}
+    for spec in specs:
+        name, _, value = spec.partition("=")
+        if name not in selected or name in overrides or not re.fullmatch(r"[0-9]+", value) or int(value) < 1:
+            parser.error("--phase-cap needs one selected NAME=positive_integer per override")
+        overrides[name] = int(value)
+    return overrides
+
+
+def _stage(case, stage, cap, specs, parser):
+    if cap < 0:
+        parser.error("--max-tokens must be nonnegative")
+    selected = ("plan", "gather", "write", "verify-sources", "review", "clarify") if stage == "stage1" else ("revise",)
+    overrides = _phase_overrides(specs, selected, parser)
+    work = case / "work"
+    runs = work / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    progress = runs / "progress.txt"
+    completed = {}
+    if progress.is_file():
+        for line in progress.read_text(encoding="utf-8").splitlines():
+            fields = line.split("\t")
+            if len(fields) == 7 and fields[5] == "done":
+                completed[fields[1], fields[2]] = fields[6]
+                if fields[2] == "review":
+                    completed.pop((fields[1], "clarify"), None)
+    total = 0
+
+    def record(name, phase, used, status="done", signature=""):
+        line = "\t".join((datetime.now(timezone.utc).isoformat(), name, phase, str(used),
+                          str(total), status, signature))
+        with progress.open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+        print(line, flush=True)
+        if status == "done":
+            completed[name, phase] = signature
+            if phase == "review":
+                completed.pop((name, "clarify"), None)
+
+    def phase_limit(phase, remaining):
+        if phase == "gather" and phase not in overrides:
+            return int(remaining * GATHER_BUDGET_FRACTION)
+        return min(remaining, overrides.get(phase, REVISION_CAPS.get(phase, remaining)))
+
+    limits = " ".join(f"{phase}={phase_limit(phase, cap)}" for phase in selected)
+    record("-", stage, 0, "start", f"max-tokens={cap} {limits}")
+
+    def run_phase(name, phase, prompt, extra=""):
+        limit = phase_limit(phase, cap - total)
+        messages = _phase_messages(case, name, phase, prompt)
+        if extra:
+            messages[0].content += "\n\n" + extra
+        with learn.observe_run(case, name, stage, limit, None) as receipt:
+            return _run_phase(case, phase, messages, limit, runs, total, name, receipt)
+
+    if stage == "stage1":
+        if not (case / "index.md").is_file():
+            ingest(case)
+            record("-", "ingest", 0)
+        if not (work / "plan.md").is_file() and total < cap:
+            _, used = run_phase(None, "plan", PLAN_PROMPT)
+            total += used
+            record("-", "plan", used, "done" if (work / "plan.md").is_file() else "unfinished")
+
+    _, order = _plan(case, use_headings=True)
+    names = list(dict.fromkeys(n for _, n in order))
+    if any(not n or Path(n).name != n or "\t" in n or "\\" in n for n in names):
+        parser.error("plan section names must be single filename stems")
+    extra = ""
+    answers_key = b""
+    if stage == "stage2":
+        cfg = _settings(case)
+        _, _, answers = export_answers(case, cfg)
+        rows = [f"{n}: {answer} ({author})" for n, (_, answer, author) in sorted(answers.items()) if answer]
+        if rows:
+            extra = "Case answers by question number:\n" + "\n".join(rows)
+        owner = case / "commission/澄清答复.md"
+        answers_key = sha256((owner.read_bytes() if owner.is_file() else b"") + b"\x00" + extra.encode()).digest()
+
+    unfinished = []
+    stopped = False
+    for name in names:
+        body = work / "sections" / (name + ".md")
+        notes = work / "notes" / (name + ".md")
+        questions = work / "clarifications" / (name + ".md")
+        reviews = work / "reviews"
+        if stage == "stage1":
+            phases = [(phase, prompt, path) for (phase, prompt), path in zip(_section_phases(name), (notes, body))]
+            phases.extend([("verify-sources", None, reviews / (name + "-sources.md")),
+                           ("review", None, reviews / (name + ".md")), ("clarify", None, questions)])
+        else:
+            phases = [("revise", None, body)]
+        for phase, prompt, target in phases:
+            signature = ""
+            existed = target.is_file()
+            if existed:
+                if phase == "revise":
+                    signature = sha256(answers_key + body.read_bytes()).hexdigest()
+                    if completed.get((name, phase)) == signature:
+                        continue
+                elif phase != "clarify" or (name, "review") not in completed or (name, phase) in completed:
+                    continue
+            if stopped or total >= cap or (phase == "revise" and not existed):
+                unfinished.append(f"{name} ({phase})")
+                break
+            if phase == "verify-sources":
+                check(case, name)
+            log, used = run_phase(name, phase, prompt, extra)
+            total += used
+            done = target.is_file()
+            if existed:
+                done = _updated_in_place(log, target.relative_to(case).as_posix(), phase)
+                if phase == "revise":
+                    signature = sha256(answers_key + body.read_bytes()).hexdigest()
+            record(name, phase, used, "done" if done else "unfinished", signature)
+            if not done:
+                print(f"{name}: {phase} ended without a completed output.")
+                unfinished.append(f"{name} ({phase})")
+                stopped = True
+                break
+    print(export_docx(case))
+    record("-", "export", 0)
+    if not names or not (work / "plan.md").is_file():
+        print("Unfinished sections: unavailable without a section plan.")
+    elif unfinished:
+        print("Unfinished sections: " + ", ".join(unfinished))
+    else:
+        print(f"{stage} complete: {len(names)} sections.")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="reportagent")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("ingest", "export", "plan", "run", "review", "revise", "check"):
+    for name in ("ingest", "export", "plan", "run", "review", "revise", "check", "stage1", "stage2"):
         command = commands.add_parser(name)
         command.add_argument("case", type=Path)
-        if name in ("plan", "run", "review", "revise"):
+        if name in ("plan", "run", "review", "revise", "stage1", "stage2"):
             command.add_argument("--max-tokens", type=int, required=True)
         if name in ("review", "revise", "check"):
             command.add_argument("--section", required=name != "check")
@@ -728,6 +897,7 @@ def main():
         if name == "revise":
             command.add_argument("--phases", metavar="LIST", help="Comma-separated phases in the revision workflow")
             command.add_argument("--preflight", action="store_true", help="estimate affordable requests without calling the model")
+        if name in ("revise", "stage1", "stage2"):
             command.add_argument("--phase-cap", action="append", default=[], metavar="NAME=N",
                                  help="Override one selected phase's token cap (repeatable)")
         if name == "run":
@@ -753,6 +923,8 @@ def main():
 
 
 def _execute(args, parser, receipt):
+    if args.command in ("stage1", "stage2"):
+        return _stage(args.case, args.command, args.max_tokens, args.phase_cap, parser)
     if args.command == "replay":
         if args.batch and not args.section:
             parser.error("--batch requires --section")
@@ -778,13 +950,7 @@ def _execute(args, parser, receipt):
         selected = [s.strip() for s in args.phases.split(",")] if args.phases is not None else list(phase_caps)
         if len(set(selected)) != len(selected) or any(s not in phase_caps for s in selected):
             parser.error("--phases needs distinct names from " + ", ".join(phase_caps))
-        overrides = {}
-        for spec in args.phase_cap:
-            name, _, value = spec.partition("=")
-            if name not in selected or name in overrides or not re.fullmatch(r"[0-9]+", value) or int(value) < 1:
-                parser.error("--phase-cap needs one selected NAME=positive_integer per override")
-            overrides[name] = int(value)
-        phase_caps.update(overrides)
+        phase_caps.update(_phase_overrides(args.phase_cap, selected, parser))
     remaining = args.max_tokens
     total = 0
     folder = args.case / "work/runs"
@@ -797,7 +963,7 @@ def _execute(args, parser, receipt):
     else:
         folder.mkdir(parents=True, exist_ok=True)
     if args.command == "plan":
-        phases = (("plan", "Plan the report requested in /commission/."),)
+        phases = (("plan", PLAN_PROMPT),)
     elif args.command == "revise":
         phases = [(phase, None) for phase in REVISION_CAPS if phase in selected]
     elif args.command == "review":
@@ -806,14 +972,7 @@ def _execute(args, parser, receipt):
                              f"Save the review to /work/reviews/{name}.md."),)
     elif args.section:
         name = args.section
-        requirements = f"Its required contents are under heading ## {name} in /work/plan.md."
-        phases = (
-            ("gather", f"Gather evidence for section {name} requested in /commission/. "
-             f"{requirements} Save evidence notes to /work/notes/{name}.md."),
-            ("write", f"Write section {name}. {requirements} "
-             f"Use the evidence notes in /work/notes/{name}.md. "
-             f"Save the section to /work/sections/{name}.md."),
-        )
+        phases = _section_phases(name)
     else:
         phases = (
             ("gather", "Gather evidence for the section requested in /commission/."),
@@ -832,13 +991,7 @@ def _execute(args, parser, receipt):
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
         if phase in REVISION_CAPS:
             limit = min(limit, phase_caps[phase])
-        messages = (_revision_messages(args.case, args.section, phase, prompt) if phase in REVISION_CAPS
-                    else [HumanMessage(content=prompt)])
-        first = messages[0]
-        if supplied := first.response_metadata.get("supplied_files"):
-            notice = supplied_notice(supplied)
-            first.content = ([{"type": "text", "text": notice}, *first.content] if isinstance(first.content, list)
-                             else notice + "\n\n" + first.content)
+        messages = _phase_messages(args.case, getattr(args, "section", None), phase, prompt)
         if preflight:
             _preflight(args.case, args.section, phase, messages, limit)
             continue
