@@ -26,9 +26,10 @@ def test_two_stages(tmp_path, monkeypatch, capsys):
         phases.append(phase)
         name = "" if phase == "plan" else next(names)
         body = f"/work/sections/{name}.md"
+        heading = "**Southern** reservoir" if name == "South" else name
         target, value = {
             "plan": ("/work/plan.md", plan), "gather": (f"/work/notes/{name}.md", "Synthetic notes"),
-            "write": (body, f"# {name}\n\nDraft text"),
+            "write": (body, f"# {heading}\n\nDraft text"),
             "verify-sources": (f"/work/reviews/{name}-sources.md", "Source check"),
             "review": (f"/work/reviews/{name}.md", "Review"),
             "clarify": (f"/work/clarifications/{name}.md",
@@ -67,14 +68,18 @@ def test_two_stages(tmp_path, monkeypatch, capsys):
     assert phases == ["plan", *section_phases, *section_phases]
     # Replace the client sheet as an upload would, then add an owner answer at the configured path.
     headers = cfg["sheet_columns"].split("|")
-    _xlsx(book, headers, [[1, "South", "", "Colour?", "", "Open", "Amber", "Client"],
-                          [2, "North", "", "Colour?", "", "Open", "", ""]], cfg)
+    _xlsx(book, headers, [[1, "Southern reservoir", "", "Colour?", "", "Open", "Amber", "Client"],
+                          [2, "North", "", "Colour?", "", "Open", "", ""],
+                          [3, "评估流程和方法", "", "Method?", "", "Open", "Universal rule", "Client"]], cfg)
     (case / "commission/answer-key.md").write_text("2: Indigo\n")
     run(case, "stage2", 300000, monkeypatch)
     assert phases[-2:] == ["revise", "revise"]
     for log in (case / "work/runs").glob("*-revise.jsonl"):
         prompt = json.loads(log.read_text().splitlines()[0])["content"]
-        assert "Amber" in prompt and "Indigo" in prompt
+        answers = prompt.split("Case answers by question number:\n")[1]
+        assert "Universal rule" in answers
+        assert ("Amber" in answers) == ("section South " in prompt)
+        assert ("Indigo" in answers) == ("section North " in prompt)
     assert [p.text for p in Document(case / "out/report.docx").paragraphs].count("Revised text") == 2
     printed = capsys.readouterr().out
     assert all(line in printed for line in progress.read_text().splitlines()[len(lines):])
@@ -85,9 +90,9 @@ def test_two_stages(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "make_model", lambda phase: phases.append(phase) or ScriptedModel(
         responses=[AIMessage(content="No further edit", usage_metadata=dict(input_tokens=3, output_tokens=1, total_tokens=4))]))
     run(case, "stage2", 300000, monkeypatch)
-    assert phases.count("revise") == 4
+    assert phases.count("revise") == 3
     run(case, "stage2", 300000, monkeypatch)
-    assert phases.count("revise") == 4
+    assert phases.count("revise") == 3
 
 
 def test_budget_exports_partial_and_resumes(tmp_path, monkeypatch, capsys):

@@ -24,7 +24,7 @@ from langsmith import tracing_context
 from . import learn
 from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
 from .budget import TokenCapMiddleware, estimate_input
-from .export.docx import _SCENARIO, _VALUE, _plan, _risk_statements, _settings, export_answers, clarification_numbers, export_docx, section_flags
+from .export.docx import _SCENARIO, _VALUE, _plan, _risk_statements, _settings, export_answers, clarification_numbers, export_docx, section_flags, sheet_section_title
 from .ingest import ingest
 from .models import PHASE_SETTINGS, make_model
 
@@ -867,15 +867,12 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
     if any(not n or Path(n).name != n or "\t" in n or "\\" in n for n in names):
         parser.error("plan section names must be single filename stems")
     extra = ""
-    answers_key = b""
     if stage == "stage2":
         cfg = _settings(case)
-        _, _, answers = export_answers(case, cfg)
-        rows = [f"{n}: {answer} ({author})" for n, (_, answer, author) in sorted(answers.items()) if answer]
-        if rows:
-            extra = "Case answers by question number:\n" + "\n".join(rows)
+        answer_sections = {}
+        _, _, answers = export_answers(case, cfg, answer_sections)
         owner = case / "commission/澄清答复.md"
-        answers_key = sha256((owner.read_bytes() if owner.is_file() else b"") + b"\x00" + extra.encode()).digest()
+        owner_text = owner.read_bytes() if owner.is_file() else b""
 
     unfinished = []
     pending_elsewhere = False
@@ -890,6 +887,11 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
             phases.extend([("verify-sources", None, reviews / (name + "-sources.md")),
                            ("review", None, reviews / (name + ".md")), ("clarify", None, questions)])
         else:
+            titles = {name, sheet_section_title(body, cfg), "评估流程和方法"}
+            rows = [f"{n}: {answer} ({author})" for n, (_, answer, author) in sorted(answers.items())
+                    if answer and answer_sections.get(n) in titles]
+            extra = "Case answers by question number:\n" + "\n".join(rows) if rows else ""
+            answers_key = sha256(owner_text + b"\x00" + extra.encode()).digest()
             phases = [("revise", None, body)]
         for phase, prompt, target in phases:
             signature = ""
