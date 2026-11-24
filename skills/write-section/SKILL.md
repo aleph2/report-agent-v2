@@ -31,4 +31,5 @@ After saving, reply in one line with the saved paths.
 
 In the revise phase, use calculate_score for every F, range endpoint and scenario figure written in the text.
 When client answers change an indicator, first update that row of the score table and recompute F and the grade with calculate_score, in your first edit response; then update the prose that cites the row or states F or the grade.
+Client answers filed under another slope or under 评估流程和方法 often set rules for every slope (for example: drainage is treated as effective, excavation avoids the rainy season, annual rainfall is taken at its least favourable value, joints that do not run through mean lower risk). Before scoring each indicator, check all answers for such a rule; apply it to this slope and cite its question number in that row.
 Review supplied internal-file mentions and replace internal references in client-facing wording with the underlying engineering evidence or an explicit evidence gap.
