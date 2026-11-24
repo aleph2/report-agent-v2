@@ -33,7 +33,7 @@ An agent system that writes an assessment report from supplied source documents 
 
 | Measure | Budget |
 |---|---|
-| Our own code in `src/reportagent/`, excluding `export/` | 2,500 lines |
+| Our own code in `src/reportagent/`, excluding `export/` | 2,800 lines |
 | Ported code in `src/reportagent/export/` | 1,700 lines |
 | Modules | 7 plus `export/` |
 | Our own tools | 5 |
@@ -58,3 +58,5 @@ Going over a budget needs the owner's decision, recorded below.
 - Task 116 (2026-11-23): The owner chose a team-only browser UI served on localhost on one machine. The team uploads materials, runs stage 1, downloads the draft and client question sheet, uploads the answered sheet, runs stage 2, and downloads the final report. The UI shows progress and token use. Task 116 supplies the two serial stage commands. The local page is Task 117, after review and merge of Task 116.
 
 - Task 120 (2026-11-24): The system learner proposes lessons from client answers. The owner reviews every lesson and decides whether to adopt, edit or reject it. Codex builds the mechanism, and Claude reviews proposals during development. A paid trial on real answers requires separate owner approval.
+
+- Task 122 (2026-11-24): The owner delegated budget decisions to Claude. Claude raised the core budget from 2,500 to 2,800 lines for the skills-and-lessons page.
