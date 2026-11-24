@@ -250,3 +250,36 @@ def test_large_upload_allows_status_and_retry(workspace):
     post(url, "/finish", key)
     assert json.loads(get(url, status))["ready"]
     (case / "sources/large.pdf").unlink()
+
+
+def test_case_total_uses_recorded_responses(workspace):
+    from reportagent import learn
+
+    url, cases, *_ = workspace
+    case = cases / "synthetic"
+    logs = case / "work/runs"
+    logs.mkdir(parents=True)
+    (logs / "progress.txt").write_text("t\ts\tstage1\t999\t777\tdone\t-\n")
+    def log(name, usages):
+        path = logs / (name + ".jsonl")
+        path.write_text("".join(json.dumps(dict(type="ai", content="Reply", usage_metadata={"total_tokens": use}))
+                                + "\n" for use in usages))
+        return path
+    old = log("old-review", [7, None])
+    log("legacy-write", [3])
+    learn._learn_records(case)
+    def total():
+        return json.loads(get(url, "/api/case?case=synthetic"))["case_tokens"]
+    assert total() == 10
+    # An incremental receipt can coexist with a historical signal for its first phase.
+    with learn.observe_run(case, None, "run", 50000, None) as receipt:
+        learn.begin_phase(receipt, "review", old, 50000, {})
+        learn.begin_phase(receipt, "write", log("new-write", [11, 5]), 50000, {})
+    with learn.observe_run(case, None, "learn propose", 50000, None) as receipt:
+        learn.begin_phase(receipt, "learn", log("new-learn", [13]), 50000, {})
+    signals = case / "work/learn/signals"
+    before = {p.name: p.stat().st_mtime_ns for p in signals.iterdir()}
+    assert total() == json.loads(get(url, "/api/cases"))[0]["case_tokens"] == 39
+    assert json.loads(get(url, "/api/case?case=synthetic"))["last"][4] == "777"
+    assert before == {p.name: p.stat().st_mtime_ns for p in signals.iterdir()}
+    assert 'title="含各阶段及经验学习运行"' in get(url, "/").decode()

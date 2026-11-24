@@ -984,6 +984,29 @@ def _serve(cases, port):
     def missing(case, plan):
         return [item for item in plan if not location(case, Path(item[0]) / basename(item[1])).is_file()]
 
+    def case_tokens(case):
+        totals, historical = {}, {}
+        manifests = location(case, "work/learn/runs")
+        for path in location(case, "work/learn/signals").glob("*.json"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                record = json.loads(path.read_bytes())
+            except FileNotFoundError:
+                continue  # A rebuild may retire a historical signal during a page refresh.
+            phases = record["S1_S2_S3"]
+            usage = [sum(r["total_tokens"] or 0 for r in p["requests"]) for p in phases]
+            if record["header"].get("provenance") == {"grouping": "unattributed historical phase log"}:
+                historical[(case / "work/runs" / (path.stem + ".jsonl")).resolve()] = sum(usage)
+                continue
+            manifest = manifests / path.name
+            entries = json.loads(manifest.read_bytes())["phases"] if manifest.is_file() and not manifest.is_symlink() else []
+            for i, tokens in enumerate(usage):
+                key = (case / entries[i]["log"]).resolve() if i < len(entries) else (path, i)
+                totals[key] = tokens
+        # An attributed phase supersedes the historical placeholder for that transcript.
+        return sum((historical | totals).values())
+
     def status(case, detail=False):
         progress = location(case, "work/runs/progress.txt")
         lines = progress.read_text(encoding="utf-8").splitlines() if progress.is_file() else []
@@ -992,7 +1015,7 @@ def _serve(cases, port):
         marker = case / ".pending-uploads"
         ready, plan = read_plan(marker) if detail else (not marker.exists(), None)
         result = dict(name=case.name, running=job.args[3] if job else None, last=rows[-1] if rows else [],
-                      ready=ready, case_tokens=sum(int(row[3]) for row in rows if row[3].isdecimal()))
+                      ready=ready, case_tokens=case_tokens(case))
         if detail:
             result.update(planned=isinstance(plan, list), file_count=len(plan or []), missing=missing(case, plan or []))
             files = {}
