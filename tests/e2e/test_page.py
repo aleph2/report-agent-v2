@@ -283,3 +283,32 @@ def test_case_total_uses_recorded_responses(workspace):
     assert json.loads(get(url, "/api/case?case=synthetic"))["last"][4] == "777"
     assert before == {p.name: p.stat().st_mtime_ns for p in signals.iterdir()}
     assert 'title="含各阶段及经验学习运行"' in get(url, "/").decode()
+
+
+def test_case_fixed_text_template_and_values(workspace, tmp_path):
+    url, cases, _, _ = workspace
+    post(url, "/create", {"case": "Existing"})
+    template = tmp_path / "templates/fixed-text.docx"
+    template.parent.mkdir()
+    Document().save(template)
+    post(url, "/create", {"case": "New"})
+    folder = cases / "New/commission"
+    assert (folder / template.name).read_bytes() == template.read_bytes()
+    assert not (cases / "Existing/commission" / template.name).exists()
+    path = folder / "fixed-text-values.txt"
+    custom = "# keep this line\n组织开展湖【项目名】=>组织开展【项目名】\n"
+    path.write_text(custom + "【项目名】=>旧名称\n【项目名】=>重复\n", encoding="utf-8")
+    def detail():
+        return json.loads(get(url, "/api/case?case=New"))["fixed_values"]
+    assert detail() == ["重复", ""]
+    fields = {"case": "New", "project": "合成项目", "count": "5"}
+    post(url, "/fixed-values", fields)
+    assert detail() == ["合成项目", "5"]
+    assert path.read_text(encoding="utf-8") == custom + "【项目名】=>合成项目\n【评估对象有几处，填在这里】=>5\n"
+    for invalid in [dict(fields, project="a\nb"), dict(fields, project="a\0b"), {"case": "New", "project": ""}]:
+        with pytest.raises(HTTPError, match="400"):
+            post(url, "/fixed-values", invalid)
+    assert detail() == ["合成项目", "5"]
+    post(url, "/fixed-values", dict(fields, count=""))
+    assert detail() == ["合成项目", ""]
+    assert "【评估对象有几处，填在这里】=>" not in path.read_text(encoding="utf-8")

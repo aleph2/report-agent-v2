@@ -16,8 +16,10 @@ from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
+from docx.oxml.ns import nsmap, qn
 from docx.shared import Pt
+from docx.opc.part import Part
+from docx.text.paragraph import Paragraph
 
 
 def _inline(document, paragraph, text, cfg, fallback=()):
@@ -539,6 +541,158 @@ def export_answers(case, cfg, sections=None):
     return destinations, snapshot, answers
 
 
+FIXED_FIELDS = ("【项目名】", "【评估对象有几处，填在这里】")
+_FIXED_HEADINGS = ("前言", "概述", "评估流程和方法", "风险控制措施建议", "评估结果自我评价及遗留问题说明")
+
+
+def fixed_values(path):
+    if not path.is_file():
+        return {}
+    return {old: new for line in path.read_text(encoding="utf-8-sig").splitlines()
+            for old, sep, new in [line.partition("=>")] if sep and old}
+
+
+def _replace_fixed_text(paragraph, values):
+    nodes = list(paragraph.iter(qn("w:t")))
+    for old in sorted(values, key=len, reverse=True):
+        text = "".join(n.text or "" for n in nodes)
+        for match in reversed(list(re.finditer(re.escape(old), text))):
+            start = 0
+            for n in nodes:
+                value = n.text or ""
+                end = start + len(value)
+                if start < match.end() and end > match.start():
+                    left = max(0, match.start() - start)
+                    replacement = values[old] if start <= match.start() else ""
+                    n.text = value[:left] + replacement + value[max(0, match.end() - start):]
+                    if n.text and n.text != n.text.strip():
+                        n.set(qn("xml:space"), "preserve")
+                start = end
+    return "".join(n.text or "" for n in nodes)
+
+
+def _fixed_sections(case, document, flags):
+    path = case / "commission/fixed-text.docx"
+    if not path.is_file():
+        return {}
+    source = Document(path)
+    values = fixed_values(path.with_name("fixed-text-values.txt"))
+    groups = defaultdict(list)
+    parts, styles, numbers, abstracts = {}, {}, {}, {}
+    package = document.part.package
+
+    def copy_part(part):
+        if part in parts:
+            return parts[part]
+        name = part.partname
+        if any(p.partname == name for p in package.iter_parts()):
+            stem, dot, suffix = str(name).rpartition(".")
+            name = package.next_partname(stem + "-fixed%d" + dot + suffix)
+        cloned = parts[part] = Part(name, part.content_type, part.blob, package)
+        for rel in part.rels.values():
+            child = rel.target_ref if rel.is_external else copy_part(rel.target_part)
+            cloned.load_rel(rel.reltype, child, rel.rId, rel.is_external)
+        return cloned
+
+    def copy_style(style_id):
+        if style_id in styles:
+            return styles[style_id]
+        style = source.styles.element.get_by_id(style_id)
+        if style is None:
+            return style_id
+        same = document.styles.element.get_by_name(style.name_val)
+        if same is not None:
+            styles[style_id] = same.styleId
+        else:
+            cloned = deepcopy(style)
+            cloned.styleId = "Fixed_" + style_id
+            while document.styles.element.get_by_id(cloned.styleId) is not None:
+                cloned.styleId += "_"
+            styles[style_id] = cloned.styleId
+            document.styles.element.append(cloned)
+            for ref in cloned.xpath("w:basedOn|w:next|w:link"):
+                ref.set(qn("w:val"), copy_style(ref.get(qn("w:val"))))
+            for num in cloned.xpath("w:pPr/w:numPr/w:numId"):
+                num.val = copy_num(num.val)
+        return styles[style_id]
+
+    def copy_num(number):
+        if not number or number in numbers:
+            return numbers.get(number, number)
+        src = source.part.numbering_part.element
+        dst = document.part.numbering_part.element
+        num = src.num_having_numId(number)
+        aid = num.abstractNumId.val
+        if aid not in abstracts:
+            abstract = deepcopy(src.xpath(f'w:abstractNum[@w:abstractNumId="{aid}"]')[0])
+            new_id = 1 + max((int(x.get(qn("w:abstractNumId"))) for x in dst.findall(qn("w:abstractNum"))), default=-1)
+            abstract.set(qn("w:abstractNumId"), str(new_id))
+            # Keep copied list definitions separate from the report's heading numbering.
+            for ref in list(abstract.iter(qn("w:pStyle"))):
+                ref.getparent().remove(ref)
+            dst.insert(0, abstract)
+            abstracts[aid] = new_id
+        cloned = deepcopy(num)
+        cloned.numId = dst._next_numId
+        cloned.abstractNumId.val = abstracts[aid]
+        dst.append(cloned)
+        numbers[number] = cloned.numId
+        return cloned.numId
+
+    current = None
+    for block in source.element.body:
+        if block.tag not in (qn("w:p"), qn("w:tbl")):
+            continue
+        heading = Paragraph(block, source) if block.tag == qn("w:p") else None
+        if heading is not None:
+            title = re.sub(r"^[\d.、．\s]+", "", re.sub(r"\s+", "", heading.text))
+            if title == "前言" or (title in _FIXED_HEADINGS and heading.style.name.startswith("Heading ")):
+                current = title
+            elif title and heading.style.name == "Heading 1":
+                current = None
+        if not current:
+            continue
+        cloned = deepcopy(block)
+        for node in cloned.iter():
+            for attr, rid in list(node.attrib.items()):
+                if attr.startswith("{" + nsmap["r"] + "}"):
+                    rel = source.part.rels[rid]
+                    other = rel.target_ref if rel.is_external else copy_part(rel.target_part)
+                    node.set(attr, document.part.relate_to(other, rel.reltype, rel.is_external))
+            if node.tag in (qn("w:pStyle"), qn("w:rStyle"), qn("w:tblStyle")):
+                node.set(qn("w:val"), copy_style(node.get(qn("w:val"))))
+        for para in cloned.iter(qn("w:p")):
+            text = _replace_fixed_text(para, values)
+            flags.extend("固定文本保留占位符 " + token for token in dict.fromkeys(re.findall(r"【[^】]+】", text)))
+            p = Paragraph(para, document)
+            numbered = p.style.name.startswith("Heading ")
+            prop = para.pPr
+            num = prop.numPr if prop is not None else None
+            if numbered and not text.strip():
+                p.style = document.styles["Normal"]
+                para.get_or_add_pPr().get_or_add_numPr().get_or_add_numId().val = 0
+            elif numbered and re.match(r"^\s*\d+[.、．\d]*", text):
+                para.get_or_add_pPr().get_or_add_numPr().get_or_add_numId().val = 0
+            elif numbered and current != _FIXED_HEADINGS[-1]:
+                if num is not None:
+                    prop.remove(num)
+            elif num is not None and num.numId is not None:
+                num.numId.val = copy_num(num.numId.val)
+        groups[current].append(cloned)
+    for title in _FIXED_HEADINGS:
+        if title not in groups:
+            print(f"固定文本未找到“{title}”，该部分使用现有导出内容。")
+    return groups
+
+
+def _append_fixed(document, blocks):
+    paragraphs = []
+    for block in blocks:
+        document.element.body.insert_element_before(block, "w:sectPr")
+        paragraphs.extend(Paragraph(p, document) for p in block.iter(qn("w:p")))
+    return paragraphs
+
+
 def export_docx(case_dir):
     case = Path(case_dir)
     template = case / "commission/template"
@@ -572,9 +726,22 @@ def export_docx(case_dir):
     registers = snapshot.parent
     records, scores, flags = [], {}, []
     pattern = _material_pattern(case)
+    fixed = _fixed_sections(case, document, flags)
+    _append_fixed(document, fixed.get("前言", []))
+    in_conclusion = False
+    fixed_paragraphs = []
     for i, (level, name) in enumerate(order):
         path = case / "work/sections" / (name + ".md")
-        if path.exists():
+        if fixed and level == 1:
+            if in_conclusion:
+                _append_fixed(document, fixed.get("风险控制措施建议", []))
+            title = re.sub(r"^[\d.、．\s-]+", "", _title(name, cfg))
+            in_conclusion = title == "评估结论及建议"
+            fixed_paragraphs = (_append_fixed(document, fixed.get(title, []))
+                                if title in ("概述", "评估流程和方法", "评估结果自我评价及遗留问题说明") else [])
+        if fixed_paragraphs:
+            heading, paragraphs = fixed_paragraphs[0], fixed_paragraphs
+        elif path.exists():
             heading, paragraphs = _section(document, path, name, level, cfg)
         else:
             heading = document.add_heading(_title(name, cfg), level)
@@ -582,7 +749,7 @@ def export_docx(case_dir):
             if i + 1 == len(order) or order[i + 1][0] <= level:
                 document.add_paragraph(cfg["placeholder"], cfg["body_style"])
         scores[name] = [entry for para in paragraphs for entry in _export_scores(para.text)]
-        if path.is_file():
+        if path.is_file() and not fixed_paragraphs:
             flags.extend(_export_flags(pattern, ((f"Section {name}:{n}", line) for n, line in
                                                   enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1))))
         items = case / "work/clarifications" / (name + ".md")
@@ -609,6 +776,8 @@ def export_docx(case_dir):
             if number in conflicts:
                 status, answer, responder = cfg["item_conflict_status"], "", ""
             records.append(dict(item, number=number, audience=audience, section_id=name, section=heading.text, position=position, status=status, answer=answer, responder=responder))
+    if in_conclusion:
+        _append_fixed(document, fixed.get("风险控制措施建议", []))
     output.mkdir(parents=True, exist_ok=True)
     target = output / cfg["docx_file"]
     if toc_break is not None:

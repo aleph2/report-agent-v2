@@ -24,7 +24,7 @@ from langsmith import tracing_context
 from . import learn
 from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
 from .budget import TokenCapMiddleware, estimate_input
-from .export.docx import _SCENARIO, _VALUE, _plan, _risk_statements, _settings, export_answers, clarification_numbers, export_docx, section_flags
+from .export.docx import FIXED_FIELDS, fixed_values, _SCENARIO, _VALUE, _plan, _risk_statements, _settings, export_answers, clarification_numbers, export_docx, section_flags
 from .ingest import ingest
 from .models import PHASE_SETTINGS, make_model
 
@@ -1056,7 +1056,8 @@ def _serve(cases, port):
                 step = 4 if (case / ".client-sheet-served").is_file() else 3
             else:
                 step = 2
-            result.update(rows=rows, files=files, step=step)
+            values = fixed_values(location(case, "commission/fixed-text-values.txt"))
+            result.update(rows=rows, files=files, step=step, fixed_values=[values.get(k, "") for k in FIXED_FIELDS])
         return result
 
     class Handler(BaseHTTPRequestHandler):
@@ -1199,6 +1200,9 @@ def _serve(cases, port):
                     staged = Path(tmp) / "case"
                     for folder in ("commission", "sources"):
                         (staged / folder).mkdir(parents=True)
+                    template = location(cases.parent, "templates/fixed-text.docx")
+                    if template.is_file():
+                        copyfile(template, staged / "commission/fixed-text.docx")
                     (staged / ".pending-uploads").touch()
                     with lock:
                         if case.exists():
@@ -1207,6 +1211,23 @@ def _serve(cases, port):
                 return 201, dict(name=name)
             case = self.case(name)
             marker = case / ".pending-uploads"
+            if action == "/fixed-values":
+                values = [fields.get(k) for k in ("project", "count")]
+                if any(v is None or re.search(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ufffe\uffff]", v) for v in values):
+                    return 400, "请提交两个单行字段。"
+                with lock:
+                    if active(case) or case in answering:
+                        return 409, "请等待本案件运行或答复上传完成。"
+                    target = location(case, "commission/fixed-text-values.txt")
+                    lines = target.read_text(encoding="utf-8-sig").splitlines() if target.is_file() else []
+                    lines = [line for line in lines if not ("=>" in line and line.partition("=>")[0] in FIXED_FIELDS)]
+                    lines.extend(k + "=>" + v for k, v in zip(FIXED_FIELDS, values) if v)
+                    target.parent.mkdir(exist_ok=True)
+                    with TemporaryDirectory(dir=target.parent) as tmp:
+                        saved = Path(tmp) / "values"
+                        saved.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+                        saved.replace(target)
+                return 200, dict(name=name)
             if action == "/stop":
                 with lock:
                     job = active(case)
@@ -1288,13 +1309,13 @@ def _serve(cases, port):
                     return self.reply(503, "工作区服务正在停止。")
                 if url.path in ("/upload", "/answers"):
                     result = self.upload(url.path, dict(parse_qsl(url.query)))
-                elif url.path in ("/create", "/prepare", "/finish", "/preview", "/run", "/stop"):
+                elif url.path in ("/create", "/prepare", "/finish", "/preview", "/run", "/stop", "/fixed-values"):
                     if self.headers.get_content_type() != "application/x-www-form-urlencoded":
                         return self.reply(400, "请将案件信息与文件分开提交。")
                     length = int(self.headers.get("Content-Length", "0"))
                     if length < 0:
                         return self.reply(400, "表单长度无效。")
-                    fields = dict(parse_qsl(self.rfile.read(length).decode("utf-8")))
+                    fields = dict(parse_qsl(self.rfile.read(length).decode("utf-8"), keep_blank_values=url.path == "/fixed-values"))
                     result = self.control(url.path, fields)
                 else:
                     result = 404, "找不到此操作。"

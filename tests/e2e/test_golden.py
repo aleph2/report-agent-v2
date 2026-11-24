@@ -189,3 +189,74 @@ def test_client_guard_counts_answers_by_question_across_sheets(tmp_path):
     assert _missing_client_answers(target, cfg, selected) == 1
     selected[1]["number"] = 2
     assert _missing_client_answers(target, cfg, selected) == 0
+
+
+def test_client_fixed_text_preserves_word_parts(tmp_path, capsys):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import qn
+    from docx.opc.packuri import PackURI
+    from docx.opc.part import Part
+
+    case = tmp_path
+    commission = case / "commission"
+    commission.mkdir()
+    sections = case / "work/sections"
+    sections.mkdir(parents=True)
+    names = ["01-概述", "02-工程概况", "03-评估流程和方法", "04-范围", "05-评估结论及建议", "06-评估结果自我评价及遗留问题说明"]
+    order = [(1, n) for n in names]
+    for i, n in ((5, "05-4-保留"), (3, "03-1-不再导出")):
+        order.insert(i, (2, n))
+        (sections / (n + ".md")).write_text("Child " + n)
+    (case / "work/plan.md").write_text("---\n" + "".join(f"section: {level}|{n}\n" for level, n in order) + "---")
+    for name in names:
+        (sections / (name + ".md")).write_text("Draft " + name)
+    src = Document()
+    src.add_paragraph("前 言")
+    para = src.add_paragraph("湖【项")
+    para.add_run("目名】（【缺项】）").bold = True
+    src.add_heading("概述", 1)
+    item = src.add_paragraph("Synthetic numbered item")
+    num = item._p.get_or_add_pPr().get_or_add_numPr()
+    num.get_or_add_numId().val = 5
+    src.add_heading("", 1)
+    src.add_heading("工程概况", 1)
+    src.add_paragraph("Excluded stub")
+    src.add_heading("评估流程和方法", 1)
+    tbl = src.add_table(rows=2, cols=2)
+    tbl.cell(0, 0).merge(tbl.cell(0, 1)).text = "Merged 【项目名】"
+    equation = src.add_paragraph()
+    base = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+    def relate(name, content_type, data, kind):
+        part = Part(PackURI(name), content_type, data, src.part.package)
+        return src.part.relate_to(part, base + kind)
+    obj = relate("/word/embeddings/oleObject1.bin", "application/vnd.openxmlformats-officedocument.oleObject", b"synthetic-ole", "oleObject")
+    img = relate("/word/media/image1.wmf", "image/x-wmf", b"synthetic-preview", "image")
+    equation.add_run()._r.append(parse_xml(f'<w:object xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="{base[:-1]}" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:v="urn:schemas-microsoft-com:vml"><v:shape><v:imagedata r:id="{img}"/></v:shape><o:OLEObject Type="Embed" ProgID="Synthetic.Equation" r:id="{obj}"/></w:object>'))
+    src.add_heading("5.5风险控制措施建议", 2)
+    src.add_paragraph("Value 【评估对象有几处，填在这里】")
+    src.add_heading("6、评估结果自我评价及遗留问题说明", 1)
+    src.add_paragraph("Fixed end")
+    src.save(commission / "fixed-text.docx")
+    (commission / "fixed-text-values.txt").write_text("【项目名】=>Test\n【评估对象有几处，填在这里】=>5\n湖【项目名】=>【项目名】\n")
+    doc = Document(export_docx(case))
+    body = [p.text for p in doc.paragraphs]
+    assert [p for p in body if p.startswith("Draft ")] == ["Draft " + names[i] for i in (1, 3, 4)]
+    assert body.index("Test（【缺项】）") < body.index("Synthetic numbered item") < body.index("Draft " + names[1])
+    assert body.index("Draft " + names[4]) < body.index("Value 5") < body.index("Fixed end") and "Excluded stub" not in body
+    assert doc.tables[0].cell(0, 0).text == "Merged Test" and doc.tables[0].cell(0, 0)._tc.grid_span == 2
+    for tag, payload in [("OLEObject", b"synthetic-ole"), ("imagedata", b"synthetic-preview")]:
+        el, = doc.element.xpath('.//*[local-name()="' + tag + '"]')
+        assert doc.part.related_parts[el.get(qn("r:id"))].blob == payload
+    title = next(p for p in doc.paragraphs if p.style.name == "Heading 2" and p.text.startswith("5.5"))
+    assert title._p.pPr.numPr.numId.val == 0
+    assert "Child 03-1-不再导出" not in body
+    assert body.index("Draft " + names[4]) < body.index("Child 05-4-保留") < body.index("Value 5")
+    assert all(p.text.strip() for p in doc.paragraphs if p.style.name.startswith("Heading "))
+    copied = next(p for p in doc.paragraphs if p.text == item.text)
+    num_id = copied._p.pPr.numPr.numId.val
+    assert num_id != 5 and doc.part.numbering_part.element.xpath(f'w:num[@w:numId="{num_id}"]')
+    assert "【缺项】" in (case / "out/client-readiness.txt").read_text()
+    src.paragraphs[-2]._p.getparent().remove(src.paragraphs[-2]._p)
+    src.save(commission / "fixed-text.docx")
+    export_docx(case)
+    assert "评估结果自我评价及遗留问题说明" in capsys.readouterr().out
