@@ -205,14 +205,16 @@ def _fields(text):
     return pairs
 
 
-def _plan(case):
+def _plan(case, *, use_headings=False):
     path = case / "work/plan.md"
     text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
     front = re.match(r"\A---\r?\n(.*?)\r?\n---", text, re.S)
     pairs = _fields(front[1]) if front else []
     metadata = dict(pairs)
     order = [(int(value.partition("|")[0]), value.partition("|")[2].strip()) for key, value in pairs if key == "section"]
-    if not order:
+    if not order and use_headings:
+        order = [(1, h.strip()) for h in re.findall(r"^##[ \t]+(.+)$", text, re.M)]
+    elif not order:
         order = [(1, p.stem) for p in sorted((case / "work/sections").glob("*.md"))]
     return metadata, order
 
@@ -489,6 +491,24 @@ def _export_flags(pattern, texts):
             yield f"{location} | {mention}"
 
 
+def export_answers(case, cfg):
+    xlsx = case / "out" / cfg["xlsx_file"]
+    registers = case / "work/question-registers"
+    destinations = {"client": xlsx, "method": registers / "chapter-03-method.xlsx",
+                    "internal": registers / "internal.xlsx", "unclassified": registers / "unclassified.xlsx"}
+    answers = {}
+    # Keep one recoverable answer snapshot if a workbook is locked midway through audience changes.
+    snapshot = registers / "answers.xlsx"
+    for target in (snapshot, destinations["method"], destinations["internal"], destinations["unclassified"], xlsx):
+        answers.update(_old_answers(target, cfg))
+    replies = case / cfg["answers_file"] if cfg["answers_file"] else None
+    if replies and replies.exists():
+        for number, answer in re.findall(r"(?m)^(\d+):[ \t]*(.+)$", replies.read_text(encoding="utf-8-sig")):
+            status = answers.get(int(number), [cfg["item_status"]])[0]
+            answers[int(number)] = [status, answer, cfg["answer_author"]]
+    return destinations, snapshot, answers
+
+
 def export_docx(case_dir):
     case = Path(case_dir)
     template = case / "commission/template"
@@ -516,22 +536,11 @@ def export_docx(case_dir):
         if cfg["footer_field"] and not any(cfg["footer_field"] in (n.text or "") for n in section.footer._element.iter(qn("w:instrText"))):
             _field(section.footer.paragraphs[0], cfg["footer_field"])
     output = case / "out"
-    xlsx = output / cfg["xlsx_file"]
-    registers = case / "work/question-registers"
-    destinations = {"client": xlsx, "method": registers / "chapter-03-method.xlsx",
-                    "internal": registers / "internal.xlsx", "unclassified": registers / "unclassified.xlsx"}
-    answers = {}
-    # Keep one recoverable answer snapshot if a workbook is locked midway through audience changes.
-    snapshot = registers / "answers.xlsx"
-    for target in (snapshot, destinations["method"], destinations["internal"], destinations["unclassified"], xlsx):
-        answers.update(_old_answers(target, cfg))
+    destinations, snapshot, answers = export_answers(case, cfg)
+    xlsx = destinations["client"]
+    registers = snapshot.parent
     records, scores, flags = [], {}, []
     pattern = _material_pattern(case)
-    replies = case / cfg["answers_file"] if cfg["answers_file"] else None
-    if replies and replies.exists():
-        for number, answer in re.findall(r"(?m)^(\d+):[ \t]*(.+)$", replies.read_text(encoding="utf-8-sig")):
-            status = answers.get(int(number), [cfg["item_status"]])[0]
-            answers[int(number)] = [status, answer, cfg["answer_author"]]
     for i, (level, name) in enumerate(order):
         path = case / "work/sections" / (name + ".md")
         if path.exists():

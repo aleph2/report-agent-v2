@@ -54,3 +54,5 @@ Going over a budget needs the owner's decision, recorded below.
 ## Decisions by the owner
 
 - Task 80 (2026-11-21): Under the owner's delegation, Claude approved a separate `src/reportagent/learn.py` for learning records. This permits eight core Python modules for this extraction.
+
+- Task 116 (2026-11-23): The owner chose a team-only browser UI served on localhost on one machine. The team uploads materials, runs stage 1, downloads the draft and client question sheet, uploads the answered sheet, runs stage 2, and downloads the final report. The UI shows progress and token use. Task 116 supplies the two serial stage commands. The local page is Task 117, after review and merge of Task 116.
