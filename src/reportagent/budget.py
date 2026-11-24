@@ -88,8 +88,10 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         # Price the usual tool set conservatively even when the final request offers only a save.
         tools = request.tools
         if request.state.get("final_save_rule"):
-            save = "edit_file" if self.phase == "revise" else "write_file"
-            request = request.override(tools=[tool for tool in request.tools if getattr(tool, "name", None) == save])
+            saves = ("edit_file",) if self.phase in ("revise", "sync") else ("write_file",)
+            if self.phase == "rescore":
+                saves = ("write_file", "edit_file")
+            request = request.override(tools=[tool for tool in request.tools if getattr(tool, "name", None) in saves])
         if not (self.info or self.guard):
             return request
         messages = ([request.system_message] if request.system_message else []) + request.messages
@@ -175,8 +177,10 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         previous = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
         last_input = (previous.usage_metadata or {}).get("input_tokens") if previous else None
         if last_input is not None and self.max_tokens - total < 2 * (last_input + self.output_reserve):
-            if self.phase == "revise":
-                save = "In the revise phase, make all remaining edits now, as separate edit_file calls in this one response."
+            if self.phase in ("revise", "sync"):
+                save = f"In the {self.phase} phase, make all remaining edits now, as separate edit_file calls in this one response."
+            elif self.phase == "rescore":
+                save = "Save the calculated table now with write_file, or edit_file if it exists."
             elif self.phase == "clarify":
                 save = ("In the clarify phase, use write_file to save the complete official clarification file now. "
                         "Keep every existing item and its number, except an evidenced collision renumbering. "

@@ -19,7 +19,7 @@ RUN_PROFILE = HarnessProfile(
 
 def make_model(phase=None, *, offline=False):
     load_dotenv(Path.cwd() / ".env")
-    name = os.environ.get("REVIEW_MODEL_NAME") if phase in ("verify-sources", "review", "clarify", "revise") else None
+    name = os.environ.get("REVIEW_MODEL_NAME") if phase in ("verify-sources", "review", "clarify", "revise", "rescore", "sync") else None
     name = name or os.environ["MODEL_NAME"]
     # Helpers and automatic summaries would bypass the main token counter.
     register_harness_profile(f"openai:{name}", RUN_PROFILE)
@@ -29,7 +29,7 @@ def make_model(phase=None, *, offline=False):
     return init_chat_model(
         model=name, model_provider="openai", base_url="http://127.0.0.1" if offline else os.environ["OPENAI_BASE_URL"],
         api_key="offline" if offline else os.environ["OPENAI_API_KEY"], temperature=0.0, max_retries=0,
-        model_kwargs={"parallel_tool_calls": phase == "revise"},
+        model_kwargs={"parallel_tool_calls": phase in ("revise", "sync")},
         **options,
         # Close HTTP/1.1 sockets after each response, retaining framework settings.
         # https://www.rfc-editor.org/rfc/rfc9112.html#section-9.6

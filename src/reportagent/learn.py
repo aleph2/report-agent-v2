@@ -65,6 +65,7 @@ def _phase_signal(log, phase, section, cap):
         attempts = {n: {} for n in replies}
     target = {"verify-sources": f"reviews/{section}-sources.md", "review": f"reviews/{section}.md",
               "clarify": f"clarifications/{section}.md", "revise": f"sections/{section}.md",
+              "sync": f"sections/{section}.md", "rescore": f"sections/{section}.table.md",
               "learn": "learn/proposals.md", "plan": "plan.md", "gather": f"notes/{section}.md", "write": f"sections/{section}.md"}.get(phase)
     wrote = defaultdict(set)
     for turn, call, success in file_operations(turns):
@@ -258,7 +259,7 @@ def _learn_record(case, source):
         checklog.append(dict(phase=phase, before=before.get("checks"), after=after.get("checks")))
         saved = any(r.get("outcome") == "saved" for r in metrics["requests"])
         for fid, item in {**before.get("findings", {}), **after.get("findings", {})}.items():
-            touched = phase == "revise" and saved and bool(set(entry.get("changed_lines", ())).intersection(item["lines"]))
+            touched = phase in ("revise", "sync") and saved and bool(set(entry.get("changed_lines", ())).intersection(item["lines"]))
             if touched or fid not in findings:
                 findings[fid] = dict(status="touched" if touched else "open", citation=item["text"])
         if phase == "review" and saved and after.get("review_known"):
@@ -271,7 +272,7 @@ def _learn_record(case, source):
                    else False if None not in prior + later else None)
         events.append(dict(phase=phase, conflicts_before=before.get("conflicts"), numbers_before=before.get("numbers"), numbers_after=after.get("numbers"),
                            conflicts=after.get("conflicts"), F_grade_before=prior, F_grade_after=later,
-                           F_grade_changed=changed if phase == "revise" else None, saved=saved,
+                           F_grade_changed=changed if phase in ("revise", "sync") else None, saved=saved,
                            review_ids=list(after["findings"]) if phase == "review" and saved and after.get("review_known") else None,
                            fixed_ids=[f for f, v in after.get("findings", {}).items() if v["fixed"]]))
     header = {k: source.get(k, "unknown") for k in ("run_id", "task", "commit", "cap", "command", "section", "provenance")}
@@ -325,7 +326,7 @@ def _learn_records(case, latest=None):
                     for fid, finding in other["S5"].items():
                         if finding["status"] != "resolved-by-owner" and (fid not in event["review_ids"] or fid in event["fixed_ids"]):
                             finding["status"] = "resolved-by-review"
-        if previous and any(e["phase"] == "revise" for e in previous[-1]["S7"]):
+        if previous and any(e["phase"] in ("revise", "sync") for e in previous[-1]["S7"]):
             previous[-1]["clarify_sync_followed"] = (h["run_id"] if h["phases"] == ["clarify"]
                                                      and any(e["saved"] for e in record["S7"]) else False)
         previous.append(record)

@@ -60,3 +60,5 @@ Going over a budget needs the owner's decision, recorded below.
 - Task 120 (2026-11-24): The system learner proposes lessons from client answers. The owner reviews every lesson and decides whether to adopt, edit or reject it. Codex builds the mechanism, and Claude reviews proposals during development. A paid trial on real answers requires separate owner approval.
 
 - Task 122 (2026-11-24): The owner delegated budget decisions to Claude. Claude raised the core budget from 2,500 to 2,800 lines for the skills-and-lessons page.
+
+- Task 129 (2026-11-24): The owner approved a fixed rescore → sync sequence for scored sections. Code checks row products, the weight sum, F, the configured grade and written score/grade statements. A mismatch records the lines and leaves the phase unfinished. The agent chooses the evidence, conditions and scores.

@@ -18,6 +18,16 @@ tool_policy = "restricted"
 thinking_budget = 6000
 output_reserve = 24000
 
+[rescore]
+tool_policy = "restricted"
+thinking_budget = 6000
+output_reserve = 16000
+
+[sync]
+tool_policy = "restricted"
+thinking_budget = 4000
+output_reserve = 16000
+
 [learn]
 tool_policy = "restricted"
 thinking_budget = 4000

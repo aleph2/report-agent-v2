@@ -740,7 +740,7 @@
         new Date(s).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       const stageLabel = (s) => (s === 'stage1' ? '第一阶段' : s === 'stage2' ? '第二阶段' : s)
       const phases = { ingest: '整理资料', plan: '制定计划', gather: '收集依据', write: '撰写初稿',
-        'verify-sources': '核实引文', review: '复核', clarify: '整理待澄清问题', revise: '修订', export: '导出成果' }
+        'verify-sources': '核实引文', review: '复核', clarify: '整理待澄清问题', revise: '修订', rescore: '重算评分表', sync: '同步正文', export: '导出成果' }
       const phaseName = (key) => phases[key] || stageLabel(key)
       const statusName = (key) => ({ start: '已启动', done: '已完成', unfinished: '未完成' })[key] || key
       const capText = (text) => text.split(' ').map((item) => {
@@ -775,7 +775,7 @@
         for (const id of ['stage1', 'stage2']) el(id).setAttribute('aria-pressed', String(id === s))
         el('start').textContent = '运行' + stageLabel(s)
         el('stageDescription').textContent = s === 'stage1' ? '第一阶段：初稿与待澄清清单' : '第二阶段：终稿'
-        el('caps').placeholder = s === 'stage1' ? 'clarify=60000' : 'revise=220000'
+        el('caps').placeholder = s === 'stage1' ? 'clarify=60000' : 'rescore=165000\nsync=150000'
       }
       function choose(name) {
         selected = name

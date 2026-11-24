@@ -24,7 +24,8 @@ from langsmith import tracing_context
 from . import learn
 from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
 from .budget import TokenCapMiddleware, estimate_input
-from .export.docx import FIXED_FIELDS, fixed_values, _SCENARIO, _VALUE, _plan, _risk_statements, _settings, export_answers, clarification_numbers, export_docx, section_flags
+from .export.docx import (FIXED_FIELDS, _SCENARIO, _VALUE, _plan, _risk_statements, _settings, answered_client_rows,
+                          clarification_numbers, export_answers, export_docx, fixed_values, section_flags)
 from .ingest import ingest
 from .models import PHASE_SETTINGS, make_model
 
@@ -32,7 +33,7 @@ from .models import PHASE_SETTINGS, make_model
 GATHER_BUDGET_FRACTION = 0.6
 REVISION_CAPS = {"verify-sources": 80000, "review": 100000, "clarify": 40000, "revise": 80000}
 
-STAGE_PHASES = {"stage1": ("plan", "gather", "write", "verify-sources", "review", "clarify"), "stage2": ("revise",)}
+STAGE_PHASES = {"stage1": ("plan", "gather", "write", "verify-sources", "review", "clarify"), "stage2": ("revise", "rescore", "sync")}
 
 REPLAY_CAPS = {"verify-sources": 90000, "review": 100000, "clarify": 100000, "revise": 130000}
 REPLAY_BATCHES = {"verify-review": ("verify-sources", "review"), "clarify-revise": ("clarify", "revise")}
@@ -359,6 +360,177 @@ def _score_arithmetic(path):
             yield f"{path.stem} line {n}: table F/grade {display}/{grade}; stated {stated}"
     if not compared:
         yield f"{path.stem}: table F/grade {display}/{grade}; no comparable baseline statement found"
+
+_SCORE_IDS = ("X11", "X12", "X21", "X22", "X23", "X31", "X32", "X41", "X42", "X51", "X52")
+_DECIMAL_CELL = r"(?:\d+(?:\.\d+)?|\.\d+)"
+
+
+def _score_text(line):
+    return unicodedata.normalize("NFKC", re.sub(r"</?su[bp]>|\*\*|\*([RXF])\*", r"\1", line)).strip()
+
+
+def _scoring_table(lines):
+    for start, raw in enumerate(lines):
+        if not raw.lstrip().startswith("|"):
+            continue
+        cells = _score_text(raw).strip("|").split("|")
+        columns = [next((i for i, c in enumerate(cells) if re.search(pattern, c, re.I)), None)
+                   for pattern in (r"指标|indicator", r"\bR(?:ij)?\b", r"权重|γ|weight", r"\bX(?:ij)?\b")]
+        if None in columns or len(set(columns)) != 4:
+            continue
+        end = start + 1
+        while end < len(lines) and lines[end].lstrip().startswith("|"):
+            end += 1
+        return start, end, columns
+
+
+def _score_excerpt(lines):
+    frame = _scoring_table(lines)
+    if not frame:
+        return ""
+    start, end, _ = frame
+    excerpt = []
+    include = False
+    for i, line in enumerate(lines):
+        relevant = re.search("适用性|取值说明", line)
+        if re.match(r"^#{1,6}\s", line):
+            include = bool(relevant)
+        if start <= i < end or include or (line.startswith("|") and relevant):
+            excerpt.append(line)
+    return "\n".join(excerpt)
+
+
+def _table_gate(text, handoff=None, calculations=None):
+    """Compare numeric assertions to the saved baseline and named scenario overrides."""
+    lines = text.splitlines()
+    frame = _scoring_table(lines)
+    if not frame:
+        return ["line 1: no scoring table with indicator, R, weight and X columns"]
+    start, end, (indicator, r_col, w_col, x_col) = frame
+    errors = []
+    if _scoring_table(lines[end:]):
+        errors.append(f"line {end+1}: more than one scoring table in this section")
+    values, weights = {}, {}
+    summaries = []
+    for n in range(start + 2, end):
+        cells = [c.strip() for c in _score_text(lines[n]).strip("|").split("|")]
+        if any("合计" in c or c.lower() == "total" for c in cells[:2]):
+            summaries.append(n)
+            continue
+        match = re.search(r"\bX\s*(\d{2})(?!\d)", cells[indicator] if indicator < len(cells) else "", re.I)
+        if (not match or max(r_col, w_col, x_col) >= len(cells) or
+                not all(re.fullmatch(_DECIMAL_CELL, cells[i]) for i in (r_col, w_col, x_col))):
+            errors.append(f"line {n+1}: expected one indicator and numeric baseline R, weight and X")
+            continue
+        key = "X" + match[1]
+        r, w, x = (Decimal(cells[i]) for i in (r_col, w_col, x_col))
+        if key in values or key not in _SCORE_IDS or not (0 <= r <= 100 and 0 <= w <= 1):
+            errors.append(f"line {n+1}: duplicate/unknown indicator or out-of-range R/weight for {key}")
+            continue
+        values[key], weights[key] = r, w
+        product = score_result(r*w)["F"]
+        if x != Decimal(product):
+            errors.append(f"line {n+1}: {key} weighted X should be {product}")
+    if set(values) != set(_SCORE_IDS):
+        errors.append(f"line {start+1}: expected the eleven distinct indicators")
+    if sum(weights.values()) != 1:
+        errors.append(f"line {start+1}: weights sum to {sum(weights.values())}, expected 1.00")
+    if errors:
+        return errors
+    if handoff is not None and handoff.strip() not in text:
+        errors.append(f"line {start+1}: section does not contain the complete checked table and results")
+
+    def result(rows):
+        return score_result(sum(v * weights[k] for k, v in rows.items()))
+
+    baseline = result(values)
+    scenarios = {}
+    required = [values]
+    label = r"情景[\[【]([^\]】]+)[\]】]"
+    for n, raw in enumerate((handoff if handoff is not None else text).splitlines(), 1):
+        line = _score_text(raw)
+        scenario = re.match(label, line)
+        if not scenario:
+            continue
+        changes = re.findall(r"\bR(\d{2})\s*=\s*(" + _DECIMAL_CELL + r")", line)
+        if not changes:
+            continue
+        overrides = {"X" + k: Decimal(v) for k, v in changes}
+        if (overrides.keys() - values.keys() or len(changes) != len(overrides)
+                or any(v > 100 for v in overrides.values()) or scenario[1] in scenarios):
+            errors.append(f"line {n}: invalid or duplicate scenario overrides for {scenario[1]}")
+        else:
+            required.append(values | overrides)
+            scenarios[scenario[1]] = result(required[-1])
+    if calculations is not None:
+        for scores in required:
+            if (scores, weights) not in calculations:
+                errors.append(f"line {start+1}: baseline or scenario inputs missing from successful calculate_score results")
+    seen_f = set()
+    seen_grade = set()
+    for n, raw in enumerate(lines):
+        if n in (start, start+1):
+            continue
+        if start+1 < n < end and n not in summaries:
+            raw = raw.strip().strip("|").split("|")[-1]
+        for clause in re.split(r"[。；;]", _score_text(raw)):
+            scenario = re.search(label, clause)
+            name = scenario[1] if scenario else ""
+            expected = scenarios.get(name) if name else baseline
+            # Remove threshold definitions, retaining any adjacent statement about this slope.
+            clause = re.sub(r"(?:IV|III|II|I)\s*级[^,，;。()]{0,10}F\s*[<>≤≥]\s*\d+(?:\.\d+)?", "", clause)
+            clause = re.sub(r"(?:\d+(?:\.\d+)?\s*[<≤]\s*)?F\s*[<>≤≥]\s*\d+(?:\.\d+)?\s*(?:为|对应)?\s*(?:IV|III|II|I)级", "", clause)
+            grades = re.findall(r"(?<![A-Za-z])((?:IV|III|II|I))\s*级", clause, re.I)
+            statements = list(_risk_statements(clause))
+            grades.extend(g for _, _, g in statements if g)
+            scores = [value for _, value, _ in statements if value is not None]
+            marks = list(re.finditer(r"(?<![A-Za-z])F\s*[=:为]\s*", clause, re.I))
+            for m in marks.copy():
+                formula = re.match(r"(?:[Σ∑]|sum\b)[^,，;。]*", clause[m.end():], re.I)
+                if formula:
+                    last = formula[0].rsplit("=", 1)
+                    if len(last) == 2 and (v := re.match(_DECIMAL_CELL, last[1].strip())):
+                        scores.append(Decimal(v[0]))
+                    elif len(last) == 1:
+                        marks.remove(m)
+            if (len(marks) > len(scores) or re.search(r"\bF\s*=\s*[\d.]+\s*[~～至–—]\s*[\d.]+", clause)):
+                errors.append(f"line {n+1}: ambiguous F statement; state each endpoint as a named scenario")
+            if not scores and not grades:
+                continue
+            if expected is None:
+                errors.append(f"line {n+1}: unknown scenario {name}")
+                continue
+            if scores:
+                seen_f.add(name)
+            if grades:
+                seen_grade.add(name)
+            if any(v != Decimal(expected["F"]) for v in scores) or any(g.upper() != expected["grade"] for g in grades):
+                errors.append(f"line {n+1}: expected {name or 'baseline'} F={expected['F']}, {expected['grade']}级")
+    for name in ("", *scenarios):
+        if name not in seen_f or name not in seen_grade:
+            errors.append(f"line {start+1}: missing F or grade for {name or 'baseline'}")
+    return list(dict.fromkeys(errors))
+
+
+def _calculated_inputs(log):
+    inputs = []
+    messages = [json.loads(line) for line in log.read_text().splitlines()]
+    for reply, results in learn.recorded_turns(messages):
+        for call in reply.get("tool_calls", []):
+            response = results.get(call["id"], {})
+            if call["name"] != "calculate_score" or response.get("status") != "success":
+                continue
+            result = json.loads(response["content"])
+            if not result.get("base", {}).get("Xij"):
+                continue
+            args = call["args"]
+            def decimals(items):
+                return {k: Decimal(str(v)) for k, v in items.items()}
+            base, weights = decimals(args["scores"]), decimals(args["weights"])
+            inputs.append((base, weights))
+            inputs.extend((base | decimals(changes), weights) for changes in args.get("scenarios") or [])
+    return inputs
+
 
 def _verification_comparison(case, name, section, count):
     output = []
@@ -754,6 +926,18 @@ def _section_phases(name):
 
 
 def _phase_messages(case, name, phase, prompt):
+    if phase in ("rescore", "sync"):
+        body = f"work/sections/{name}.md"
+        table = body[:-3] + ".table.md"
+        notes = f"work/notes/{name}.md"
+        paths = [notes] if phase == "rescore" else [body, table]
+        blocks = ([f"Rescore {name}. Save /{table}.", "Current scoring and applicability excerpt:\n" +
+                   _score_excerpt((case / body).read_text(encoding="utf-8-sig").splitlines())]
+                  if phase == "rescore" else [f"Synchronize the following section /{body} to the checked table /{table}."])
+        for path in paths:
+            value = (case / path).read_text(encoding="utf-8-sig") if (case / path).is_file() else "(unavailable)"
+            blocks.append(f"/{path}\n{value}")
+        return [HumanMessage(content="\n\n".join(blocks), response_metadata={"supplied_files": [p for p in paths if (case / p).is_file()]})]
     messages = (_revision_messages(case, name, phase, prompt) if phase in REVISION_CAPS
                 else [HumanMessage(content=prompt)])
     first = messages[0]
@@ -764,12 +948,31 @@ def _phase_messages(case, name, phase, prompt):
     return messages
 
 
+def _rescore_answers(case, cfg):
+    blocks = []
+    for row in answered_client_rows(case / "out" / cfg["xlsx_file"], cfg):
+        fields = [f"{k}: {v}" for k, v in row.items() if v and k not in ("number", "answer")]
+        blocks.append("\n".join([f"Q{row.get('number') or '?'}: {row['answer']}", *fields]))
+    return "Answered client workbook rows:\n" + "\n\n".join(blocks) if blocks else ""
+
+
+def _stage_messages(case, name, phase, prompt, lessons, extra):
+    messages = _phase_messages(case, name, phase, prompt)
+    if lessons and phase in ("plan", "gather", "write", "clarify", "revise", "rescore"):
+        messages[0].content += "\n\nOwner-adopted lessons for reference:\n" + lessons
+        if phase == "clarify":
+            messages[0].content += "\nAsk the client to confirm applicable DEFAULT lessons for this case."
+    if extra:
+        messages[0].content += "\n\n" + extra
+    return messages
+
+
 def _updated_in_place(log, target, phase):
     # The draft and preliminary questions can exist before their final phase starts.
     messages = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     operations = [ok for _, call, ok in learn.file_operations(learn.recorded_turns(messages))
                   if call["args"].get("file_path", "").lstrip("/") == target]
-    if phase == "clarify":
+    if phase in ("clarify", "rescore"):
         return bool(operations) and all(operations)
     # A clean no-edit decision is possible; a budget stop after a partial edit is unfinished.
     last = messages[-1]
@@ -820,6 +1023,8 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
                 completed[fields[1], fields[2]] = fields[6]
                 if fields[2] == "review":
                     completed.pop((fields[1], "clarify"), None)
+            elif len(fields) == 7 and fields[2] == "rescore" and fields[5] == "unfinished":
+                completed[fields[1], "rescore"] = "unfinished"
     total = 0
 
     def record(name, phase, used, status="done", signature=""):
@@ -836,7 +1041,8 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
     def phase_limit(phase, remaining):
         if phase == "gather" and phase not in overrides:
             return int(remaining * GATHER_BUDGET_FRACTION)
-        return min(remaining, overrides.get(phase, REVISION_CAPS.get(phase, remaining)))
+        default = {"rescore": 165000, "sync": 150000}.get(phase, REVISION_CAPS.get(phase, remaining))
+        return min(remaining, overrides.get(phase, default))
 
     lessons = learn.library_text(library)
     limits = " ".join(f"{phase}={phase_limit(phase, cap)}" for phase in selected)
@@ -844,13 +1050,7 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
 
     def run_phase(name, phase, prompt, extra=""):
         limit = phase_limit(phase, cap - total)
-        messages = _phase_messages(case, name, phase, prompt)
-        if lessons and phase in ("plan", "gather", "write", "clarify", "revise"):
-            messages[0].content += "\n\nOwner-adopted lessons for reference:\n" + lessons
-            if phase == "clarify":
-                messages[0].content += "\nAsk the client to confirm applicable DEFAULT lessons for this case."
-        if extra:
-            messages[0].content += "\n\n" + extra
+        messages = _stage_messages(case, name, phase, prompt, lessons, extra)
         with learn.observe_run(case, name, stage, limit, None) as receipt:
             return _run_phase(case, phase, messages, limit, runs, total, name, receipt)
 
@@ -867,6 +1067,7 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
     if any(not n or Path(n).name != n or "\t" in n or "\\" in n for n in names):
         parser.error("plan section names must be single filename stems")
     extra = ""
+    client_rows = None
     answers_key = b""
     if stage == "stage2":
         cfg = _settings(case)
@@ -885,18 +1086,38 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
         notes = work / "notes" / (name + ".md")
         questions = work / "clarifications" / (name + ".md")
         reviews = work / "reviews"
+        if stage == "stage2" and any(not p.resolve().is_relative_to(case.resolve())
+                                     for p in (body, notes, body.with_suffix(".table.md"))):
+            parser.error("section tables, section drafts and evidence notes must be inside the case")
         if stage == "stage1":
             phases = [(phase, prompt, path) for (phase, prompt), path in zip(_section_phases(name), (notes, body))]
             phases.extend([("verify-sources", None, reviews / (name + "-sources.md")),
                            ("review", None, reviews / (name + ".md")), ("clarify", None, questions)])
+        elif body.is_file() and (body.with_suffix(".table.md").is_file() or
+                                 _scoring_table(body.read_text(encoding="utf-8-sig").splitlines())):
+            table = body.with_suffix(".table.md")
+            if client_rows is None:
+                client_rows = _rescore_answers(case, cfg)
+            # Sync edits the draft. Only inputs external to sync invalidate its saved handoff.
+            context_key = sha256(b"\x00".join((client_rows.encode(), lessons.encode(), notes.read_bytes() if notes.is_file() else b""))).digest()
+            phases = [("rescore", None, table), ("sync", None, body)]
         else:
             phases = [("revise", None, body)]
         for phase, prompt, target in phases:
             signature = ""
             existed = target.is_file()
             if existed:
-                if phase == "revise":
-                    signature = sha256(answers_key + body.read_bytes()).hexdigest()
+                if phase == "rescore":
+                    saved_table = table.read_text(encoding="utf-8-sig")
+                    signature = sha256(context_key + table.read_bytes()).hexdigest()
+                    prior = completed.get((name, phase))
+                    if prior in (None, signature) and not _table_gate(saved_table):
+                        if prior is None and (not sections or name in sections):
+                            record(name, phase, 0, "done", signature)
+                        continue
+                elif phase in ("revise", "sync"):
+                    key = answers_key if phase == "revise" else context_key + table.read_bytes()
+                    signature = sha256(key + body.read_bytes()).hexdigest()
                     if completed.get((name, phase)) == signature:
                         continue
                 elif phase != "clarify" or (name, "review") not in completed or (name, phase) in completed:
@@ -909,13 +1130,23 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
                 break
             if phase == "verify-sources":
                 check(case, name)
-            log, used = run_phase(name, phase, prompt, extra)
+            phase_extra = client_rows if phase == "rescore" else extra
+            log, used = run_phase(name, phase, prompt, "" if phase == "sync" else phase_extra)
             total += used
             done = target.is_file()
-            if existed:
-                done = _updated_in_place(log, target.relative_to(case).as_posix(), phase)
-                if phase == "revise":
-                    signature = sha256(answers_key + body.read_bytes()).hexdigest()
+            if existed or phase == "rescore":
+                done = done and _updated_in_place(log, target.relative_to(case).as_posix(), phase)
+                if phase in ("revise", "sync"):
+                    key = answers_key if phase == "revise" else context_key + table.read_bytes()
+                    signature = sha256(key + body.read_bytes()).hexdigest()
+            if phase in ("rescore", "sync") and target.is_file():
+                handoff = table.read_text(encoding="utf-8-sig")
+                findings = _table_gate(target.read_text(encoding="utf-8-sig"), handoff if phase == "sync" else None,
+                                       _calculated_inputs(log) if phase == "rescore" else None)
+                if phase == "rescore":
+                    signature = sha256(context_key + table.read_bytes()).hexdigest()
+                if findings:
+                    done, signature = False, " | ".join(findings)
             record(name, phase, used, "done" if done else "unfinished", signature)
             if not done:
                 print(f"{name}: {phase} ended without a completed output.")
@@ -1425,7 +1656,7 @@ def _execute(args, parser, receipt):
     if args.command == "check":
         if args.score_arithmetic:
             folder = args.case / "work/sections"
-            paths = [folder / f"{args.section}.md"] if args.section else sorted(folder.glob("*.md"))
+            paths = [folder / f"{args.section}.md"] if args.section else sorted(p for p in folder.glob("*.md") if not p.name.endswith(".table.md"))
             for path in paths:
                 for finding in _score_arithmetic(path):
                     print(finding)
