@@ -33,10 +33,10 @@ An agent system that writes an assessment report from supplied source documents 
 
 | Measure | Budget |
 |---|---|
-| Our own code in `src/reportagent/`, excluding `export/` | 2,800 lines |
+| Our own code in `src/reportagent/`, excluding `export/` | 3,050 lines |
 | Ported code in `src/reportagent/export/` | 1,700 lines |
 | Modules | 7 plus `export/` |
-| Our own tools | 5 |
+| Our own tools | 7 |
 | `raise` statements in our own code, excluding `export/` | 15, each for a system limit or the token cap |
 | Database tables we define | 0 |
 | Test code | less than the source it tests |
@@ -62,3 +62,5 @@ Going over a budget needs the owner's decision, recorded below.
 - Task 122 (2026-11-24): The owner delegated budget decisions to Claude. Claude raised the core budget from 2,500 to 2,800 lines for the skills-and-lessons page.
 
 - Task 129 (2026-11-24): The owner approved a fixed rescore → sync sequence for scored sections. Code checks row products, the weight sum, F, the configured grade and written score/grade statements. A mismatch records the lines and leaves the phase unfinished. The agent chooses the evidence, conditions and scores.
+
+- Task 130 (2026-11-24): Under the owner's delegation, Claude raised the core budget to 3,050 lines and the tool budget to seven for the two drawing-measurement tools. The agent chooses a layer and endpoints. Code calibrates the axes and measures the selected interval.

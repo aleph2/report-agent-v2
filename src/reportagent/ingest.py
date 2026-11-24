@@ -1,7 +1,12 @@
+from collections import defaultdict
 from contextlib import closing
 from io import BytesIO
+from itertools import combinations
+import math
 from multiprocessing import Pipe, Process
 from pathlib import Path
+import re
+from statistics import mean
 
 from docx import Document
 from docx.drawing import Drawing
@@ -10,6 +15,14 @@ from docx.table import Table
 from docx.text.run import Run
 from PIL import Image
 import pdfplumber
+from pdfminer.pdfdevice import PDFDevice
+from pdfminer.pdfexceptions import PDFException
+from pdfminer.pdfinterp import PDFPageInterpreter
+from pdfminer.pdftypes import resolve1
+from pdfminer.psexceptions import PSException
+from pdfminer.psparser import PSLiteral
+from pdfminer.utils import apply_matrix_pt, decode_text
+from pdfplumber.utils.exceptions import PdfminerException
 import pypdfium2 as pdfium
 
 
@@ -127,3 +140,197 @@ def ingest(case_dir):
     target = case_dir / "index.md"
     target.write_text("\n".join(index) + "\n", encoding="utf-8")
     return target
+
+
+class _ProfileInterpreter(PDFPageInterpreter):
+    def do_Do(self, name):
+        # After a nested form the shared device must use the parent transform again.
+        super().do_Do(name)
+        self.device.set_ctm(self.ctm)
+
+    def do_BDC(self, tag, props):
+        # CAD exports usually name the layer through an indirect page resource.
+        if isinstance(props, PSLiteral):
+            properties = resolve1(self.resources.get("Properties", {}))
+            props = resolve1(properties.get(props.name, {}))
+        super().do_BDC(tag, props)
+
+
+class _ProfileGeometry(PDFDevice):
+    def __init__(self, manager):
+        super().__init__(manager)
+        self.layers = []
+        self.paths = defaultdict(list)
+
+    def begin_tag(self, tag, props=None):
+        name = resolve1(props.get("Name")) if isinstance(props, dict) else None
+        inherited = self.layers[-1] if self.layers else ""
+        self.layers.append(decode_text(name) if isinstance(name, bytes) else inherited)
+
+    def end_tag(self):
+        if self.layers:
+            self.layers.pop()
+
+    def paint_path(self, graphicstate, stroke, fill, evenodd, path):
+        segments = []
+        first = previous = None
+        for operator, *coords in path:
+            points = [apply_matrix_pt(self.ctm, p) for p in zip(coords[::2], coords[1::2])]
+            if operator == "m":
+                first = previous = points[0]
+            elif previous is not None:
+                if operator == "h":
+                    points = [first]
+                segments.append((operator, [previous, *points]))
+                previous = points[-1]
+        if segments:
+            self.paths[self.layers[-1] if self.layers else ""].append(segments)
+
+
+def _profile_fit(groups, minimum):
+    # Find the most mutually consistent labelled ticks, then refit using all of them.
+    best = 0
+    fits = {}
+    for group in groups:
+        pairs = sorted(set(group))
+        for (first, start), (last, end) in combinations(pairs, 2):
+            if last - first < 2 or end <= start:
+                continue
+            scale = (end - start) / (last - first)
+            ticks = tuple((x, v) for x, v in pairs if abs((v-start)/scale + first-x) <= 0.7)
+            if len(ticks) < max(best, minimum) or ticks in fits:
+                continue
+            xm, vm = map(mean, zip(*ticks))
+            slope = sum((x-xm)*(v-vm) for x, v in ticks) / sum((x-xm)**2 for x, _ in ticks)
+            intercept = vm - slope*xm
+            if len(ticks) > best:
+                best, fits = len(ticks), {}
+            fits[ticks] = dict(metres_per_point=slope, intercept_m=intercept,
+                               max_residual_m=max(abs(v-slope*x-intercept) for x, v in ticks),
+                               ticks=[dict(point=round(x, 4), metres=v) for x, v in ticks])
+    if not fits:
+        return None
+    fit = min(fits.values(), key=lambda f: f["max_residual_m"])
+    # Equally well-supported but different axes cannot establish one datum.
+    x = fit["ticks"][0]["point"]
+    for other in fits.values():
+        difference = other["metres_per_point"] - fit["metres_per_point"]
+        if (abs(difference) > 0.01 * fit["metres_per_point"] or
+                abs(difference*x + other["intercept_m"] - fit["intercept_m"]) > fit["metres_per_point"]):
+            return None
+    return fit
+
+
+def _profile_axes(sheet, paths):
+    short_h, short_v, dividers = [], [], []
+    for records in paths.values():
+        for segments in records:
+            for operator, points in segments:
+                if operator != "l":
+                    continue
+                (x, y), (a, b) = points
+                if abs(y-b) < .15 and 1 <= abs(x-a) <= 14:
+                    short_h.append((min(x, a), max(x, a), y))
+                if abs(x-a) < .15 and abs(y-b) >= 1:
+                    (short_v if abs(y-b) <= 14 else dividers).append((min(y, b), max(y, b), x))
+    xs, ys, offsets = defaultdict(list), defaultdict(list), []
+    for word in sheet.extract_words():
+        text = word["text"]
+        x0, x1 = word["x0"], word["x1"]
+        y0, y1 = sheet.height-word["bottom"], sheet.height-word["top"]
+        x, y = (x0+x1)/2, (y0+y1)/2
+        direction = word["direction"]
+        offset = re.fullmatch(r"(左|右)(\d+(?:\.\d+)?)m?", text[::-1] if direction == "ttb" else text, re.I)
+        if offset:
+            # A rotated borehole offset labels its adjacent vertical divider.
+            nearby = [v for a, b, v in dividers if abs(v-x0) < 2 and a < y < b]
+            if nearby:
+                value = float(offset[2]) * (-1 if offset[1] == "左" else 1)
+                offsets.append((min(nearby, key=lambda v: abs(v-x0)), value))
+        if direction != "ltr" or not re.fullmatch(r"[-−]?\d+(?:\.\d+)?", text):
+            continue
+        value = float(text.replace("−", "-"))
+        for a, b, v in short_h:
+            if abs(v-y) <= 2.5 and (0 <= a-x1 <= 12 or 0 <= x0-b <= 12):
+                ys[round((a+b)/24)].append((v, value))
+        for a, b, v in short_v:
+            if abs(v-x) <= 4 and (0 <= a-y1 <= 14 or 0 <= y0-b <= 14):
+                xs[round((a+b)/24)].append((v, value))
+    xfit = _profile_fit([offsets], 2) or _profile_fit(xs.values(), 3)
+    yfit = _profile_fit(ys.values(), 3)
+    labels = {}
+    for axis, fit, groups in (("x", xfit, [offsets, *xs.values()]), ("y", yfit, ys.values())):
+        if fit is None:
+            labels[axis] = sorted({v for group in groups for _, v in group})
+    return xfit, yfit, labels
+
+
+def profile_data(case, file, page, layer=None, endpoints=None):
+    root = case.resolve()
+    relative = Path(file.lstrip("/"))
+    try:
+        source = (root / relative).resolve()
+    except (ValueError, OSError, RuntimeError):
+        return {"unavailable": "The source path cannot be resolved."}
+    if (relative.parts[:1] != ("sources",) or not source.is_relative_to(root / "sources")
+            or source.suffix.lower() != ".pdf" or not source.is_file() or page < 1):
+        return {"unavailable": "Choose an original PDF under /sources/ and a one-based page."}
+    try:
+        with pdfplumber.open(source, pages=[page]) as pdf:
+            if not pdf.pages:
+                return {"unavailable": "Page is outside the document."}
+            sheet = pdf.pages[0]
+            geometry = _ProfileGeometry(pdf.rsrcmgr)
+            _ProfileInterpreter(pdf.rsrcmgr, geometry).process_page(sheet.page_obj)
+            paths = geometry.paths
+            xfit, yfit, unfitted_labels = _profile_axes(sheet, paths)
+    except (OSError, PdfminerException, PDFException, PSException) as error:
+        return {"unavailable": f"Could not read the PDF page ({type(error).__name__})."}
+    info = dict(x_calibration=xfit, y_calibration=yfit)
+
+    def calibrated(point, fit):
+        return point*fit["metres_per_point"] + fit["intercept_m"]
+
+    if layer is None or unfitted_labels:
+        layers = {}
+        for name, records in paths.items():
+            xs, ys = zip(*(p for parts in records for _, points in parts for p in points))
+            layers[name] = dict(path_count=len(records))
+            for axis, values, fit in (("x_extent_m", xs, xfit), ("y_extent_m", ys, yfit)):
+                layers[name][axis] = [calibrated(min(values), fit), calibrated(max(values), fit)] if fit else None
+        if unfitted_labels:
+            info.update(unavailable="Missing or ambiguous horizontal or elevation ticks.", unfitted_labels=unfitted_labels)
+        return dict(info, layers=layers)
+    if layer not in paths:
+        return dict(info, unavailable="Layer is absent.", layers=list(paths))
+    left, right = sorted(endpoints)
+    if not all(map(math.isfinite, endpoints)) or left == right:
+        return dict(info, unavailable="Choose two distinct finite endpoints in metres.")
+    spans = []
+    for segments in paths[layer]:
+        for operator, raw in segments:
+            points = [(calibrated(x, xfit), calibrated(y, yfit)) for x, y in raw]
+            if max(x for x, _ in points) < left or min(x for x, _ in points) > right:
+                continue
+            if operator not in ("l", "h"):
+                return dict(info, unavailable="Selected interval contains a curve. Choose a polyline.")
+            (a, b), (c, d) = sorted(points)
+            if c-a < 1e-8:
+                if abs(b-d) >= .02:
+                    return dict(info, unavailable="A vertical segment makes the elevation ambiguous.")
+            else:
+                spans.append((a, b, c, d))
+    knots = sorted({left, right, *(v for a, _, c, _ in spans for v in (a, c) if left < v < right)})
+
+    def height(x):
+        values = [b+(x-a)*(d-b)/(c-a) for a, b, c, d in spans if a-1e-8 <= x <= c+1e-8]
+        return mean(values) if values and max(values)-min(values) < .02 else None
+
+    # Check between knots too: two disjoint paths can have valid heights on both ends of a gap.
+    if any(height(x) is None for x in [*knots, *((a+b)/2 for a, b in zip(knots, knots[1:]))]):
+        return dict(info, unavailable="The range crosses a gap, overlapping profiles, or the layer boundary.")
+    first, last = map(height, endpoints)
+    rise, run = last-first, right-left
+    return dict(info, layer=layer, x_from=endpoints[0], x_to=endpoints[1], elevation_from_m=first,
+                elevation_to_m=last, H0_m=rise, L0_m=run, alpha0_deg=math.degrees(math.atan2(rise, run)),
+                point_count=len(knots))
