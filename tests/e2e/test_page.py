@@ -172,7 +172,8 @@ def test_local_page(workspace, tmp_path):
     assert "Gate colour is amber." in [p.text for p in final.paragraphs]
     transcript, = (case / "work/runs").glob("*-revise.jsonl")
     revision_prompt = json.loads(transcript.read_text().splitlines()[0])["content"]
-    assert "1: amber (Operator)" in revision_prompt and "Synthetic library sentinel" not in revision_prompt
+    assert "1: amber (Operator)" in revision_prompt and revision_prompt.count("Synthetic library sentinel") == 1
+    assert "confirm applicable DEFAULT" not in revision_prompt
     assert len(list((case / "work/runs").glob("stage*-*.log"))) == 2
     upload(url, "/answers", key + [("file", sent.name)], sent.read_bytes())
     assert json.loads(get(url, case_url))["step"] == 5
