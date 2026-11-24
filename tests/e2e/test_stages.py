@@ -1,3 +1,4 @@
+from importlib.resources import files
 import json
 import sys
 
@@ -12,6 +13,20 @@ from tests.fake_model import ScriptedModel, call
 def run(case, command, cap, monkeypatch, *options):
     monkeypatch.setattr(sys, "argv", ["reportagent", command, str(case), "--max-tokens", str(cap), *options])
     cli.main()
+
+
+def test_packaged_revise_skill_requires_cross_slope_rules():
+    skill = files("reportagent.skills").joinpath(cli.PHASE_SKILLS["revise"], "SKILL.md").read_text(encoding="utf-8")
+    rule = (
+        "Client answers filed under another slope or under 评估流程和方法 often set rules for every slope (for "
+        "example: drainage is treated as effective, excavation avoids the rainy season, annual rainfall "
+        "is taken at its least favourable value, joints that do not run through mean lower risk). Before "
+        "scoring each indicator, check all answers for such a rule; apply it to this slope and cite its "
+        "question number in that row."
+    )
+    lines = skill.splitlines()
+    table_first = next(i for i, line in enumerate(lines) if line.startswith("When client answers change an indicator,"))
+    assert lines[table_first + 1] == rule
 
 
 def test_two_stages(tmp_path, monkeypatch, capsys):
