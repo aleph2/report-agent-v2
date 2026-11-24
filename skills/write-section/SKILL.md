@@ -30,4 +30,5 @@ If no notes file exists, write the section with every required item marked missi
 After saving, reply in one line with the saved paths.
 
 In the revise phase, use calculate_score for every F, range endpoint and scenario figure written in the text.
+When client answers change an indicator, first update that row of the score table and recompute F and the grade with calculate_score, in your first edit response; then update the prose that cites the row or states F or the grade.
 Review supplied internal-file mentions and replace internal references in client-facing wording with the underlying engineering evidence or an explicit evidence gap.

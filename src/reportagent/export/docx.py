@@ -308,14 +308,15 @@ def _sheet_rows(target, cfg):
     return [{field: row.get(col, "") for field, col in columns.items()} for row in rows[1:]]
 
 
-def _old_answers(target, cfg):
+def _old_answers(target, cfg, sections=None):
     if not target.exists():
         return {}
     numbered = [(int(row["number"]), row) for row in _sheet_rows(target, cfg) if row.get("number")]
     counts = Counter(number for number, _ in numbered)
-    return {number: [row.get(field, "") for field in ("status", "answer", "responder")]
-            for number, row in numbered if counts[number] == 1
-            and row.get("status") != cfg["item_conflict_status"]}
+    valid = [(n, row) for n, row in numbered if counts[n] == 1 and row.get("status") != cfg["item_conflict_status"]]
+    if sections is not None:
+        sections.update((n, row.get("section", "")) for n, row in valid)
+    return {n: [row.get(field, "") for field in ("status", "answer", "responder")] for n, row in valid}
 
 
 def _xlsx(target, headers, rows, cfg):
@@ -498,7 +499,18 @@ def _export_flags(pattern, texts):
             yield f"{location} | {mention}"
 
 
-def export_answers(case, cfg):
+def sheet_section_title(path, cfg):
+    first = next(_blocks(path.read_text(encoding="utf-8-sig"), cfg), None) if path.is_file() else None
+    if not first or first[0] != "heading":
+        return _title(path.stem, cfg)
+    # The workbook stores the rendered Word heading, including any Markdown formatting removal.
+    doc = Document()
+    heading = doc.add_paragraph()
+    _inline(doc, heading, _title(first[1][1], cfg), cfg)
+    return heading.text
+
+
+def export_answers(case, cfg, sections=None):
     xlsx = case / "out" / cfg["xlsx_file"]
     registers = case / "work/question-registers"
     destinations = {"client": xlsx, "method": registers / "chapter-03-method.xlsx",
@@ -507,7 +519,7 @@ def export_answers(case, cfg):
     # Keep one recoverable answer snapshot if a workbook is locked midway through audience changes.
     snapshot = registers / "answers.xlsx"
     for target in (snapshot, destinations["method"], destinations["internal"], destinations["unclassified"], xlsx):
-        answers.update(_old_answers(target, cfg))
+        answers.update(_old_answers(target, cfg, sections))
     replies = case / cfg["answers_file"] if cfg["answers_file"] else None
     if replies and replies.exists():
         for number, answer in re.findall(r"(?m)^(\d+):[ \t]*(.+)$", replies.read_text(encoding="utf-8-sig")):
@@ -543,7 +555,8 @@ def export_docx(case_dir):
         if cfg["footer_field"] and not any(cfg["footer_field"] in (n.text or "") for n in section.footer._element.iter(qn("w:instrText"))):
             _field(section.footer.paragraphs[0], cfg["footer_field"])
     output = case / "out"
-    destinations, snapshot, answers = export_answers(case, cfg)
+    answer_sections = {}
+    destinations, snapshot, answers = export_answers(case, cfg, answer_sections)
     xlsx = destinations["client"]
     registers = snapshot.parent
     records, scores, flags = [], {}, []
@@ -595,7 +608,7 @@ def export_docx(case_dir):
     fields = cfg["sheet_fields"].split("|")
     if any(answer or responder or status != cfg["item_status"] for status, answer, responder in answers.values()):
         registers.mkdir(parents=True, exist_ok=True)
-        saved = [dict(number=n, status=status, answer=answer, responder=responder)
+        saved = [dict(number=n, section=answer_sections.get(n, ""), status=status, answer=answer, responder=responder)
                  for n, (status, answer, responder) in answers.items()]
         _xlsx(snapshot, cfg["sheet_columns"].split("|"), [[item.get(key, "") for key in fields] for item in saved], cfg)
     for audience, destination in destinations.items():
