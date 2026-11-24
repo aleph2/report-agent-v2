@@ -2,6 +2,7 @@ Running a whole case in two stages
 
   python -m reportagent stage1 CASE --max-tokens 300000 --phase-cap clarify=60000
   python -m reportagent stage2 CASE --max-tokens 300000 --phase-cap revise=220000
+  Both stages accept repeated --section NAME to run only named sections in existing plan order, sharing one cap per invocation.
 
 Stage 1 ingests and plans the case, then runs gather, write, verify-sources,
 review and clarify for each section before exporting the draft and client sheet.

@@ -787,11 +787,22 @@ def _phase_overrides(specs, selected, parser):
     return overrides
 
 
-def _stage(case, stage, cap, specs, parser, library=None):
+def _stage(case, stage, cap, specs, parser, library=None, sections=None):
     if cap < 0:
         parser.error("--max-tokens must be nonnegative")
     selected = STAGE_PHASES[stage]
     overrides = _phase_overrides(specs, selected, parser)
+
+    def plan_names():
+        _, order = _plan(case, use_headings=True)
+        return list(dict.fromkeys(name for _, name in order))
+
+    if sections:
+        names = plan_names()
+        unknown = [name for name in dict.fromkeys(sections) if name not in names]
+        if unknown:
+            parser.error(f"Unknown --section: {', '.join(unknown)}. Valid plan sections: {', '.join(names) or '(none)'}")
+
     work = case / "work"
     runs = work / "runs"
     runs.mkdir(parents=True, exist_ok=True)
@@ -852,8 +863,7 @@ def _stage(case, stage, cap, specs, parser, library=None):
             total += used
             record("-", "plan", used, "done" if (work / "plan.md").is_file() else "unfinished")
 
-    _, order = _plan(case, use_headings=True)
-    names = list(dict.fromkeys(n for _, n in order))
+    names = plan_names()
     if any(not n or Path(n).name != n or "\t" in n or "\\" in n for n in names):
         parser.error("plan section names must be single filename stems")
     extra = ""
@@ -868,6 +878,7 @@ def _stage(case, stage, cap, specs, parser, library=None):
         answers_key = sha256((owner.read_bytes() if owner.is_file() else b"") + b"\x00" + extra.encode()).digest()
 
     unfinished = []
+    pending_elsewhere = False
     stopped = False
     for name in names:
         body = work / "sections" / (name + ".md")
@@ -890,6 +901,9 @@ def _stage(case, stage, cap, specs, parser, library=None):
                         continue
                 elif phase != "clarify" or (name, "review") not in completed or (name, phase) in completed:
                     continue
+            if sections and name not in sections:
+                pending_elsewhere = True
+                break
             if stopped or total >= cap or (phase == "revise" and not existed):
                 unfinished.append(f"{name} ({phase})")
                 break
@@ -914,6 +928,8 @@ def _stage(case, stage, cap, specs, parser, library=None):
         print("Unfinished sections: unavailable without a section plan.")
     elif unfinished:
         print("Unfinished sections: " + ", ".join(unfinished))
+    elif pending_elsewhere:
+        print(f"{stage} complete for selected sections. Other plan sections are pending.")
     else:
         if stage == "stage1":
             (case / ".draft-in-progress").unlink(missing_ok=True)
@@ -1333,6 +1349,8 @@ def main():
         command.add_argument("case", type=Path)
         if name in ("plan", "run", "review", "revise", "stage1", "stage2"):
             command.add_argument("--max-tokens", type=int, required=True)
+        if name in ("stage1", "stage2"):
+            command.add_argument("--section", action="append", metavar="NAME", help="select a plan section (repeatable)")
         if name in ("review", "revise", "check"):
             command.add_argument("--section", required=name != "check")
         if name == "check":
@@ -1374,7 +1392,7 @@ def main():
 
 def _execute(args, parser, receipt):
     if args.command in ("stage1", "stage2"):
-        return _stage(args.case, args.command, args.max_tokens, args.phase_cap, parser, args.library)
+        return _stage(args.case, args.command, args.max_tokens, args.phase_cap, parser, args.library, args.section)
     if args.command == "replay":
         if args.batch and not args.section:
             parser.error("--batch requires --section")

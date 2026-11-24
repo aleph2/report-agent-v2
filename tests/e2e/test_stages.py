@@ -157,3 +157,44 @@ def test_stage_phase_caps_apply_per_section_within_remaining_budget(tmp_path, mo
     assert "max-tokens=300000 revise=220000" in starts[1]
     output = capsys.readouterr().out
     assert all(line in output for line in starts)
+
+
+def test_stage_section_selection(tmp_path, monkeypatch, capsys):
+    import pytest
+
+    work = tmp_path / "work"
+    calls = []
+    def phase_run(case, phase, messages, limit, folder, previous_total, section, receipt):
+        calls.append((phase, section, previous_total))
+        (work / "notes" / (section + ".md")).write_text("Gathered")
+        log = folder / "synthetic.jsonl"
+        log.write_text(AIMessage(content="No revision needed", usage_metadata=dict(
+            total_tokens=7, input_tokens=5, output_tokens=2)).model_dump_json())
+        return log, 7
+    monkeypatch.setattr(cli, "_run_phase", phase_run)
+    with pytest.raises(SystemExit):
+        run(tmp_path, "stage1", 100, monkeypatch, "--section", "B")
+    assert not calls and not (work / "runs/progress.txt").exists()
+    for group in ("sections", "clarifications", "reviews", "notes"):
+        (work / group).mkdir(parents=True)
+    (work / "plan.md").write_text("## A\n## B\n## C\n")
+    for name in ("A", "B", "C"):
+        for stem in (f"sections/{name}", f"clarifications/{name}", f"reviews/{name}", f"reviews/{name}-sources"):
+            (work / (stem + ".md")).write_text("Synthetic")
+    for stage in ("stage1", "stage2"):
+        with pytest.raises(SystemExit) as error:
+            run(tmp_path, stage, 100, monkeypatch, "--section", "B", "--section", "Unknown")
+        assert error.value.code == 2 and "A, B, C" in capsys.readouterr().err
+    assert not calls and not (work / "runs/progress.txt").exists()
+    select = ("--section", "C", "--section", "A", "--section", "C")
+    for stage, phase in (("stage1", "gather"), ("stage2", "revise")):
+        calls.clear()
+        run(tmp_path, stage, 100, monkeypatch, *select)
+        assert calls == [(phase, "A", 0), (phase, "C", 7)]
+        assert (tmp_path / "out/report.docx").is_file()
+        assert not (tmp_path / ".stage2-complete").exists()
+        run(tmp_path, stage, 100, monkeypatch, *select)
+        assert len(calls) == 2
+        run(tmp_path, stage, 100, monkeypatch, "--section", "B")
+        assert calls[-1] == (phase, "B", 0)
+    assert (tmp_path / ".stage2-complete").is_file()
