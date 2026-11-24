@@ -32,6 +32,8 @@ from .models import PHASE_SETTINGS, make_model
 GATHER_BUDGET_FRACTION = 0.6
 REVISION_CAPS = {"verify-sources": 80000, "review": 100000, "clarify": 40000, "revise": 80000}
 
+STAGE_PHASES = {"stage1": ("plan", "gather", "write", "verify-sources", "review", "clarify"), "stage2": ("revise",)}
+
 REPLAY_CAPS = {"verify-sources": 90000, "review": 100000, "clarify": 100000, "revise": 130000}
 REPLAY_BATCHES = {"verify-review": ("verify-sources", "review"), "clarify-revise": ("clarify", "revise")}
 
@@ -764,7 +766,7 @@ def _phase_overrides(specs, selected, parser):
 def _stage(case, stage, cap, specs, parser):
     if cap < 0:
         parser.error("--max-tokens must be nonnegative")
-    selected = ("plan", "gather", "write", "verify-sources", "review", "clarify") if stage == "stage1" else ("revise",)
+    selected = STAGE_PHASES[stage]
     overrides = _phase_overrides(specs, selected, parser)
     work = case / "work"
     runs = work / "runs"
@@ -882,6 +884,357 @@ def _stage(case, stage, cap, specs, parser):
         print(f"{stage} complete: {len(names)} sections.")
 
 
+def _serve(cases, port):
+    import os
+    import shlex
+    import signal
+    import subprocess
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import PureWindowsPath
+    from shutil import copyfileobj
+    from threading import Lock
+    from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
+
+    cases = cases.resolve()
+    cases.mkdir(parents=True, exist_ok=True)
+    groups = {"out": "out", "registers": "work/question-registers", "logs": "work/runs"}
+    jobs = {}
+    answering = set()
+    lock = Lock()
+    stopping = False
+
+    def basename(name):
+        if (not isinstance(name, str) or not name or name in (".", "..") or Path(name).name != name or PureWindowsPath(name).name != name
+                or any(ord(c) < 32 for c in name)):
+            raise ValueError("Use a base name only. Paths and control characters are not allowed.")
+        return name
+
+    def location(case, relative):
+        path = case / relative
+        if not path.resolve().is_relative_to(case) or path.is_symlink():
+            raise ValueError("File location must stay inside the case.")
+        return path
+
+    def active(case):
+        job = jobs.get(case)
+        return job if job and job.poll() is None else None
+
+    def stop(job):
+        if os.name == "posix":
+            try:
+                os.killpg(job.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:
+            job.terminate()
+        try:
+            job.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                os.killpg(job.pid, signal.SIGKILL)
+            else:
+                job.kill()
+            job.wait()
+
+    def read_plan(marker):
+        try:
+            text = marker.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return True, None
+        return False, json.loads(text) if text else None
+
+    def missing(case, plan):
+        return [item for item in plan if not location(case, Path(item[0]) / basename(item[1])).is_file()]
+
+    def status(case, detail=False):
+        progress = location(case, "work/runs/progress.txt")
+        lines = progress.read_text(encoding="utf-8").splitlines() if progress.is_file() else []
+        rows = [line.split("\t") for line in lines if line.count("\t") == 6]
+        job = active(case)
+        marker = case / ".pending-uploads"
+        ready, plan = read_plan(marker) if detail else (not marker.exists(), None)
+        result = dict(name=case.name, running=job.args[3] if job else None, last=rows[-1] if rows else [],
+                      ready=ready, case_tokens=sum(int(row[3]) for row in rows if row[3].isdecimal()))
+        if detail:
+            result.update(planned=isinstance(plan, list), file_count=len(plan or []), missing=missing(case, plan or []))
+            files = {}
+            for group, relative in groups.items():
+                folder = location(case, relative)
+                paths = folder.glob("stage*-*.log" if group == "logs" else "*")
+                files[group] = sorted(p.name for p in paths if p.is_file() and not p.is_symlink())
+            result.update(rows=rows, files=files)
+        return result
+
+    class Handler(BaseHTTPRequestHandler):
+        def reply(self, code, data, kind="application/json; charset=utf-8"):
+            body = data if isinstance(data, bytes) else json.dumps(data, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; "
+                             "style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def local(self):
+            host = self.headers.get("Host", "")
+            expected = {f"{name}:{self.server.server_port}" for name in ("localhost", "127.0.0.1")}
+            if self.server.server_port == 80:
+                expected.update(("localhost", "127.0.0.1"))
+            return host in expected and self.headers.get("Origin", "http://" + host) == "http://" + host
+
+        def case(self, name):
+            path = location(cases, basename(name))
+            if not path.is_dir() or path == Path(staging):
+                raise FileNotFoundError("Case folder does not exist.")
+            return path
+
+        def do_GET(self):
+            if not self.local():
+                return self.reply(403, "Open this page on localhost.")
+            url = urlsplit(self.path)
+            args = parse_qs(url.query)
+            try:
+                if url.path == "/":
+                    return self.reply(200, Path(__file__).with_name("page.html").read_bytes(), "text/html; charset=utf-8")
+                if url.path == "/api/cases":
+                    with lock:
+                        folders = [p for p in sorted(cases.iterdir())
+                                   if p.is_dir() and not p.is_symlink() and p != Path(staging)]
+                    return self.reply(200, [status(p) for p in folders])
+                if url.path not in ("/api/case", "/download"):
+                    return self.reply(404, "Page not found.")
+                case = self.case(args.get("case", [""])[0])
+                if url.path == "/api/case":
+                    return self.reply(200, status(case, detail=True))
+                group = args.get("group", [""])[0]
+                name = basename(args.get("file", [""])[0])
+                if group not in groups or (group == "logs" and not Path(name).match("stage*-*.log")):
+                    return self.reply(404, "File not found.")
+                path = location(case, Path(groups[group]) / name)
+                with path.open("rb") as stream:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(name, safe=""))
+                    self.send_header("Content-Length", str(os.fstat(stream.fileno()).st_size))
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    copyfileobj(stream, self.wfile)
+            except (FileNotFoundError, IsADirectoryError):
+                self.reply(404, "File or case not found.")
+            except ValueError as error:
+                self.reply(400, str(error))
+
+        def error(self, message):
+            raise ValueError(message)
+
+        def upload(self, action, args):
+            case = self.case(args.get("case", ""))
+            name = basename(args.get("file", ""))
+            group = args.get("group")
+            marker = case / ".pending-uploads"
+            if action == "/upload":
+                if group not in ("commission", "sources"):
+                    return 400, "Choose commission or sources."
+                target = location(case, Path(group) / name)
+                _, plan = read_plan(marker)
+            else:
+                target = location(case, Path("out") / basename(_settings(case)["xlsx_file"]))
+            if self.headers.get_content_type() != "application/octet-stream":
+                return 400, "Send one file per request."
+            remaining = int(self.headers.get("Content-Length", "-1"))
+            if remaining < 0:
+                return 411, "The upload needs a content length."
+            with lock:
+                if stopping or active(case) or case in answering:
+                    return 409, "The case is busy."
+                if action == "/upload":
+                    if target.exists():
+                        return 409, f"A file with this name already exists in {group}/."
+                    if not marker.exists() or [group, name] not in (plan or []):
+                        return 409, "This file is not in the pending upload list."
+                else:
+                    if marker.exists():
+                        return 409, "Finish the case uploads first."
+                    answering.add(case)
+            try:
+                with TemporaryDirectory(dir=case, prefix=".transfer-") as tmp:
+                    saved = Path(tmp) / "body"
+                    with saved.open("wb") as stream:
+                        while remaining:
+                            chunk = self.rfile.read(min(remaining, 1024 * 1024))
+                            if not chunk:
+                                return 400, "The upload was interrupted."
+                            stream.write(chunk)
+                            remaining -= len(chunk)
+                    with lock:
+                        if action == "/upload":
+                            if target.exists():
+                                return 409, f"A file with this name already exists in {group}/."
+                            saved.rename(target)
+                        else:
+                            target.parent.mkdir(exist_ok=True)
+                            backup = target.with_name(f"{target.stem}.before-answers-{self.timestamp()}.xlsx")
+                            if target.exists():
+                                target.rename(backup)
+                            try:
+                                saved.replace(target)
+                            finally:
+                                if not target.exists() and backup.exists():
+                                    backup.rename(target)
+                return 201, dict(name=target.name)
+            finally:
+                if action == "/answers":
+                    with lock:
+                        answering.discard(case)
+
+        def control(self, action, fields):
+            name = basename(fields.get("case", ""))
+            if action == "/create":
+                case = location(cases, name)
+                with TemporaryDirectory(dir=staging) as tmp:
+                    staged = Path(tmp) / "case"
+                    for folder in ("commission", "sources"):
+                        (staged / folder).mkdir(parents=True)
+                    (staged / ".pending-uploads").touch()
+                    with lock:
+                        if case.exists():
+                            return 409, "A case with this name already exists."
+                        staged.rename(case)
+                return 201, dict(name=name)
+            case = self.case(name)
+            marker = case / ".pending-uploads"
+            if action == "/stop":
+                with lock:
+                    job = active(case)
+                if job:
+                    stop(job)
+                return 200, dict(name=name)
+            if action == "/finish":
+                ready, plan = read_plan(marker)
+                if ready:
+                    return 200, dict(name=name)
+                if plan is None or missing(case, plan):
+                    return 409, "Some case uploads are still missing."
+                with lock:
+                    marker.unlink(missing_ok=True)
+                return 200, dict(name=name)
+            if action == "/prepare":
+                names = json.loads(fields.get("files", "null"))
+                if not isinstance(names, list):
+                    return 400, "Select the files to upload."
+                seen = set()
+                for item in names:
+                    if not isinstance(item, list) or len(item) != 2 or item[0] not in ("commission", "sources"):
+                        return 400, "Choose commission or sources for each file."
+                    group, filename = item
+                    key = group, basename(filename)
+                    if key in seen:
+                        return 409, f"A file with this name already exists in {group}/."
+                    seen.add(key)
+                with TemporaryDirectory(dir=case) as tmp:
+                    updated = Path(tmp) / "plan"
+                    updated.write_text(json.dumps(names, ensure_ascii=False), encoding="utf-8")
+                    with lock:
+                        if not marker.exists():
+                            return 409, "Case is already ready."
+                        if marker.stat().st_size == 0:
+                            updated.replace(marker)
+                            return 200, dict(name=name)
+                _, plan = read_plan(marker)
+                if plan != names:
+                    return 409, "Resume the existing upload list."
+                return 200, dict(name=name)
+            stage = fields.get("stage", "")
+            cap = fields.get("max_tokens", "")
+            if stage not in STAGE_PHASES or not re.fullmatch("[0-9]+", cap):
+                return 400, "Choose a stage and enter a whole-number token cap."
+            specs = [s.strip() for s in fields.get("phase_caps", "").splitlines() if s.strip()]
+            _phase_overrides(specs, STAGE_PHASES[stage], self)
+            argv = [sys.executable, "-m", "reportagent", stage, str(case), "--max-tokens", cap]
+            for spec in specs:
+                argv.extend(("--phase-cap", spec))
+            command = shlex.join(argv)
+            with lock:
+                if stopping:
+                    return 503, "The workspace is stopping."
+                if marker.exists() or case in answering:
+                    return 409, "Finish the case uploads first."
+                if action == "/preview":
+                    return 200, dict(command=command, cap=cap)
+                if active(case):
+                    return 409, "A stage is running for this case."
+                runs = location(case, "work/runs")
+                runs.mkdir(parents=True, exist_ok=True)
+                with (runs / f"{stage}-{self.timestamp()}.log").open("xb") as stream:
+                    jobs[case] = subprocess.Popen(argv, stdout=stream, stderr=subprocess.STDOUT,
+                                                 stdin=subprocess.DEVNULL, start_new_session=os.name == "posix",
+                                                 pass_fds=(lease.fileno(),) if os.name == "posix" else (),
+                                                 env={**os.environ, "PYTHONUNBUFFERED": "1"})
+            return 202, dict(command=command)
+
+        def do_POST(self):
+            if not self.local() or self.headers.get("X-Report-Agent") != "1":
+                return self.reply(403, "Submit from the local Report Agent page.")
+            url = urlsplit(self.path)
+            try:
+                if stopping:
+                    return self.reply(503, "The workspace is stopping.")
+                if url.path in ("/upload", "/answers"):
+                    result = self.upload(url.path, dict(parse_qsl(url.query)))
+                elif url.path in ("/create", "/prepare", "/finish", "/preview", "/run", "/stop"):
+                    if self.headers.get_content_type() != "application/x-www-form-urlencoded":
+                        return self.reply(400, "Send case fields separately from files.")
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 0:
+                        return self.reply(400, "Invalid form length.")
+                    fields = dict(parse_qsl(self.rfile.read(length).decode("utf-8")))
+                    result = self.control(url.path, fields)
+                else:
+                    result = 404, "Action not found."
+            except FileNotFoundError:
+                result = 404, "Case or file not found."
+            except (ValueError, OSError) as error:
+                result = 400, str(error)
+            try:
+                self.reply(*result)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        @staticmethod
+        def timestamp():
+            return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+
+    # A single service owns the process handles for this cases folder. On WSL its children inherit the lease.
+    with location(cases, ".reportagent-serve.lock").open("a+b") as lease:
+        try:
+            if os.name == "posix":
+                import fcntl
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                import msvcrt
+                lease.seek(0)
+                msvcrt.locking(lease.fileno(), msvcrt.LK_NBLCK, 1)
+        except (BlockingIOError, PermissionError):
+            sys.exit("Another Report Agent service or stage is using this cases folder.")
+        with ThreadingHTTPServer(("127.0.0.1", port), Handler) as server, TemporaryDirectory(dir=cases) as staging:
+            print(f"http://127.0.0.1:{server.server_port}", flush=True)
+            previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                with lock:
+                    stopping = True
+                    for job in jobs.values():
+                        if job.poll() is None:
+                            stop(job)
+                signal.signal(signal.SIGTERM, previous)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="reportagent")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -903,6 +1256,9 @@ def main():
         if name == "run":
             command.add_argument("--write-only", action="store_true")
             command.add_argument("--section")
+    serve = commands.add_parser("serve", help="open the local case workspace")
+    serve.add_argument("--cases", required=True, type=Path)
+    serve.add_argument("--port", type=int, default=8765)
     replay = commands.add_parser("replay", help="compare one skill on frozen phase inputs")
     replay.add_argument("case", type=Path)
     selection = replay.add_mutually_exclusive_group(required=True)
@@ -914,6 +1270,8 @@ def main():
     for name in ("plan", "run", "review", "revise", "replay"):
         commands.choices[name].add_argument("--task", type=int, help="operator-supplied task number for learning records")
     args = parser.parse_args()
+    if args.command == "serve":
+        return _serve(args.cases, args.port)
     if args.command == "learn":
         return learn.command(args)
     if args.command in ("plan", "run", "review", "revise", "replay") and not getattr(args, "preflight", False):
