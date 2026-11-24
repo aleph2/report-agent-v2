@@ -70,16 +70,23 @@ def test_two_stages(tmp_path, monkeypatch, capsys):
     headers = cfg["sheet_columns"].split("|")
     _xlsx(book, headers, [[1, "Southern reservoir", "", "Colour?", "", "Open", "Amber", "Client"],
                           [2, "North", "", "Colour?", "", "Open", "", ""],
-                          [3, "评估流程和方法", "", "Method?", "", "Open", "Universal rule", "Client"]], cfg)
+                          [3, "评估流程和方法", "", "Method?", "", "Open", "Universal rule", "Client"],
+                          [4, "", "", "Other?", "", "Open", "Unlabelled answer", "Client"],
+                          [5, "North", "", "Unanswered?", "", "Open", "", ""]], cfg)
     (case / "commission/answer-key.md").write_text("2: Indigo\n")
     run(case, "stage2", 300000, monkeypatch)
     assert phases[-2:] == ["revise", "revise"]
-    for log in (case / "work/runs").glob("*-revise.jsonl"):
+    logs = list((case / "work/runs").glob("*-revise.jsonl"))
+    assert len(logs) == 2
+    for log in logs:
         prompt = json.loads(log.read_text().splitlines()[0])["content"]
         answers = prompt.split("Case answers by question number:\n")[1]
-        assert "Universal rule" in answers
-        assert ("Amber" in answers) == ("section South " in prompt)
-        assert ("Indigo" in answers) == ("section North " in prompt)
+        assert answers.splitlines() == [
+            "1: Amber (Client)", f"2: Indigo ({cfg['answer_author']})",
+            "3: Universal rule (Client)", "4: Unlabelled answer (Client)"]
+    labels = {}
+    _old_answers(case / "work/question-registers/answers.xlsx", cfg, labels)
+    assert labels == {1: "Southern reservoir", 2: "North", 3: "评估流程和方法", 4: "", 5: "North"}
     assert [p.text for p in Document(case / "out/report.docx").paragraphs].count("Revised text") == 2
     printed = capsys.readouterr().out
     assert all(line in printed for line in progress.read_text().splitlines()[len(lines):])
@@ -90,9 +97,9 @@ def test_two_stages(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "make_model", lambda phase: phases.append(phase) or ScriptedModel(
         responses=[AIMessage(content="No further edit", usage_metadata=dict(input_tokens=3, output_tokens=1, total_tokens=4))]))
     run(case, "stage2", 300000, monkeypatch)
-    assert phases.count("revise") == 3
+    assert phases.count("revise") == 4
     run(case, "stage2", 300000, monkeypatch)
-    assert phases.count("revise") == 3
+    assert phases.count("revise") == 4
 
 
 def test_budget_exports_partial_and_resumes(tmp_path, monkeypatch, capsys):

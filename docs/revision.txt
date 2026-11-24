@@ -8,7 +8,10 @@ Stage 1 ingests and plans the case, then runs gather, write, verify-sources,
 review and clarify for each section before exporting the draft and client sheet.
 For stage 2, put the answered workbook back in CASE/out/<xlsx_file> with its
 original headers and question numbers. Numbered text answers in cfg.answers_file
-take precedence for the same question. Each stage 2 answers block includes only rows labelled for that section or 评估流程和方法. Stage 2 revises each section and exports.
+take precedence for the same question. Each section receives all nonempty numbered
+answers in question order, including answers recorded under other sections or
+without a section label. A changed answer reopens revision for each selected
+section. Stage 2 revises the selected sections and exports.
 
 Each invocation has one shared --max-tokens allowance. Repeat --phase-cap NAME=N
 for distinct model phases in that stage. Each override replaces the phase default
