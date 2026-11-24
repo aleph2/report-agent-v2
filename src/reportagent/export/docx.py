@@ -284,11 +284,11 @@ def _anchor(paragraphs, sentence, heading):
     return [r for r in heading.runs if r.text] or [heading.add_run("\u200b")], heading.text
 
 
-def _sheet_rows(target, cfg):
+def _sheet_rows(target, cfg, sheet_path="xl/worksheets/sheet1.xml"):
     ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with ZipFile(target) as archive:
         shared = ["".join(e.itertext()) for e in fromstring(archive.read("xl/sharedStrings.xml"))] if "xl/sharedStrings.xml" in archive.namelist() else []
-        sheet = fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        sheet = fromstring(archive.read(sheet_path))
         rows = []
         for row in sheet.findall("s:sheetData/s:row", ns):
             values = {}
@@ -306,6 +306,17 @@ def _sheet_rows(target, cfg):
         if label in fields:
             columns.setdefault(fields[label], col)
     return [{field: row.get(col, "") for field, col in columns.items()} for row in rows[1:]]
+
+
+def _missing_client_answers(target, cfg, selected):
+    if not target.is_file():
+        return 0
+    with ZipFile(target) as book:
+        sheets = [name for name in book.namelist() if re.fullmatch(r"xl/worksheets/[^/]+\.xml", name)]
+    previous = Counter(row.get("number", "").strip() for sheet in sheets for row in _sheet_rows(target, cfg, sheet)
+                       if row.get("answer", "").strip())
+    proposed = Counter(str(item["number"]) for item in selected if item.get("answer", "").strip())
+    return sum((previous - proposed).values())
 
 
 def _old_answers(target, cfg, sections=None):
@@ -614,6 +625,9 @@ def export_docx(case_dir):
     for audience, destination in destinations.items():
         selected = [item for item in records if item["audience"] == audience]
         if not selected and audience != "client" and not destination.exists():
+            continue
+        if audience == "client" and (missing := _missing_client_answers(destination, cfg, selected)):
+            flags.append(f"Client workbook preserved: proposed export would omit {missing} existing answer(s).")
             continue
         rows = [[item.get(field, "") for field in fields] for item in selected]
         destination.parent.mkdir(parents=True, exist_ok=True)

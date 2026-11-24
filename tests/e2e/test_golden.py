@@ -98,8 +98,11 @@ def test_client_audience_flags_and_feedback(tmp_path):
     fields = cfg["sheet_fields"].split("|")
     answer = dict(number=1, status="Answered", answer="Updated after site inspection", responder="Owner")
     _xlsx(sheet, cfg["sheet_columns"].split("|"), [[answer.get(k, "") for k in fields]], cfg)
+    uploaded = sheet.read_bytes()
     official.write_text(official.read_text().replace("audience: client", "audience: method"))
     export_docx(tmp_path)
+    assert sheet.read_bytes() == uploaded
+    assert "preserved" in (target.parent / "client-readiness.txt").read_text()
     assert _old_answers(register / "chapter-03-method.xlsx", cfg)[1][1:] == [answer["answer"], "Owner"]
     official.write_text(official.read_text().replace("audience: method", "audience: client", 1))
     export_docx(tmp_path)
@@ -149,3 +152,40 @@ def test_contents_has_visible_headings_and_tables_have_inner_borders(tmp_path):
     borders = doc.tables[0]._tbl.tblPr.find(qn("w:tblBorders"))
     for edge in ("insideH", "insideV"):
         assert borders.find(qn("w:" + edge)).attrib == borders.find(qn("w:top")).attrib
+
+
+def test_client_guard_counts_answers_by_question_across_sheets(tmp_path):
+    from xml.etree import ElementTree as ET
+    from zipfile import ZipFile
+    from reportagent.export.docx import _missing_client_answers
+
+    cfg = _settings(tmp_path)
+    fields, headers = cfg["sheet_fields"].split("|"), cfg["sheet_columns"].split("|")
+    target = tmp_path / "uploaded.xlsx"
+    sheets = []
+    for n in (1, 2):
+        sheet = tmp_path / f"{n}.xlsx"
+        item = dict(number=n, answer=f"Client answer {n}")
+        _xlsx(sheet, headers, [[item.get(field, "") for field in fields]], cfg)
+        with ZipFile(sheet) as book:
+            sheets.append({path: book.read(path) for path in book.namelist()})
+    parts = sheets[0]
+    for path, node_name, updates in (
+            ("xl/workbook.xml", "sheet", {"name": "Other answers", "sheetId": "2",
+             "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id": "rId7"}),
+            ("xl/_rels/workbook.xml.rels", "Relationship", {"Id": "rId7", "Target": "worksheets/sheet2.xml"}),
+            ("[Content_Types].xml", "Override", {"PartName": "/xl/worksheets/sheet2.xml"})):
+        root = ET.fromstring(parts[path])
+        original = next(el for el in root.iter() if el.tag.endswith("}" + node_name) and
+                        (node_name == "sheet" or "sheet1.xml" in " ".join(el.attrib.values())))
+        parent = next(el for el in root.iter() if original in list(el))
+        ET.SubElement(parent, original.tag, original.attrib | updates)
+        parts[path] = ET.tostring(root)
+    parts["xl/worksheets/sheet2.xml"] = sheets[1]["xl/worksheets/sheet1.xml"]
+    with ZipFile(target, "w") as book:
+        for path, data in parts.items():
+            book.writestr(path, data)
+    selected = [dict(number=1, answer="A"), dict(number=3, answer="New answer")]
+    assert _missing_client_answers(target, cfg, selected) == 1
+    selected[1]["number"] = 2
+    assert _missing_client_answers(target, cfg, selected) == 0
