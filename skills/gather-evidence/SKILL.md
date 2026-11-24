@@ -11,6 +11,7 @@ When the plan gives scope criteria for items of this kind, record in the notes t
 To find a table, grep the page-NNN.txt files for its number (for example 表3-2 or A.3-1); do not navigate by the contents page, because printed page numbers differ from page-NNN numbers.
 Read each table page whole, without a line limit, and continue to the next page until the table ends.
 When a table reaches the page bottom, open the next page before saying a row or item is absent.
+For a natural ground angle, use list_profile_layers on the original cross-section PDF, choose the toe and crest on the ground line, then use measure_profile. Record the source, page, layer, endpoints and measured rise, run and angle (or the missing evidence).
 Source pages are under /sources/; /index.md lists them.
 Read the files in /commission/ for this report's scope and rules.
 Copy into the notes, once, the commission's rule on which source prevails when sources disagree, with its citation.
