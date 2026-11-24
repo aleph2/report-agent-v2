@@ -9,8 +9,8 @@ from reportagent.export.docx import _old_answers, _settings, _xlsx
 from tests.fake_model import ScriptedModel, call
 
 
-def run(case, command, cap, monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["reportagent", command, str(case), "--max-tokens", str(cap)])
+def run(case, command, cap, monkeypatch, *options):
+    monkeypatch.setattr(sys, "argv", ["reportagent", command, str(case), "--max-tokens", str(cap), *options])
     cli.main()
 
 
@@ -54,9 +54,10 @@ def test_two_stages(tmp_path, monkeypatch, capsys):
     assert "Draft text" in [p.text for p in Document(case / "out/report.docx").paragraphs]
     progress = case / "work/runs/progress.txt"
     lines = progress.read_text().splitlines()
-    assert len(lines) == 13
+    assert len(lines) == 14
+    assert "\tstage1\t0\t0\tstart\t" in lines[0]
     running = 0
-    for line in lines:
+    for line in lines[1:]:
         _, _, _, used, total, status, _ = line.split("\t")
         running += int(used)
         assert int(total) == running and status == "done"
@@ -124,3 +125,34 @@ def test_small_cap_does_not_mark_existing_draft_revised(tmp_path, monkeypatch, c
     assert "\trevise\t0\t0\tunfinished" in (tmp_path / "work/runs/progress.txt").read_text()
     assert body.read_text() == "Original draft"
     assert len(list((tmp_path / "work/runs").glob("*-revise.jsonl"))) == 1
+
+
+def test_stage_phase_caps_apply_per_section_within_remaining_budget(tmp_path, monkeypatch, capsys):
+    work = tmp_path / "work"
+    for folder in ("sections", "clarifications", "reviews", "notes"):
+        (work / folder).mkdir(parents=True)
+    (work / "plan.md").write_text("## A\n## B\n")
+    for name in ("A", "B"):
+        for stem in (f"sections/{name}", f"clarifications/{name}", f"reviews/{name}", f"reviews/{name}-sources"):
+            (work / (stem + ".md")).write_text("Synthetic")
+    calls = []
+    def consume(case, phase, messages, limit, folder, previous_total, section, receipt):
+        calls.append((phase, section, limit))
+        (work / "notes" / (section + ".md")).write_text("Notes")
+        log = folder / "fake.jsonl"
+        log.write_text(AIMessage(content="Done", usage_metadata=dict(input_tokens=limit, output_tokens=0,
+                                                                     total_tokens=limit)).model_dump_json())
+        return log, limit
+
+    monkeypatch.setattr(cli, "_run_phase", consume)
+    run(tmp_path, "stage1", 100, monkeypatch, "--phase-cap", "gather=90")
+    run(tmp_path, "stage2", 300000, monkeypatch, "--phase-cap", "revise=220000")
+    assert calls == [("gather", "A", 90), ("gather", "B", 10),
+                     ("revise", "A", 220000), ("revise", "B", 80000)]
+    lines = (work / "runs/progress.txt").read_text().splitlines()
+    starts = [line for line in lines if "\tstart\t" in line]
+    assert len(starts) == 2 and lines[0] == starts[0]
+    assert "max-tokens=100 plan=100 gather=90 write=100 verify-sources=100 review=100 clarify=100" in starts[0]
+    assert "max-tokens=300000 revise=220000" in starts[1]
+    output = capsys.readouterr().out
+    assert all(line in output for line in starts)

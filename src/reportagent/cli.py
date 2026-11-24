@@ -751,9 +751,21 @@ def _updated_in_place(log, target, phase):
             and not last.get("response_metadata", {}).get("budget_stop") and all(operations))
 
 
-def _stage(case, stage, cap, parser):
+def _phase_overrides(specs, selected, parser):
+    overrides = {}
+    for spec in specs:
+        name, _, value = spec.partition("=")
+        if name not in selected or name in overrides or not re.fullmatch(r"[0-9]+", value) or int(value) < 1:
+            parser.error("--phase-cap needs one selected NAME=positive_integer per override")
+        overrides[name] = int(value)
+    return overrides
+
+
+def _stage(case, stage, cap, specs, parser):
     if cap < 0:
         parser.error("--max-tokens must be nonnegative")
+    selected = ("plan", "gather", "write", "verify-sources", "review", "clarify") if stage == "stage1" else ("revise",)
+    overrides = _phase_overrides(specs, selected, parser)
     work = case / "work"
     runs = work / "runs"
     runs.mkdir(parents=True, exist_ok=True)
@@ -779,11 +791,16 @@ def _stage(case, stage, cap, parser):
             if phase == "review":
                 completed.pop((name, "clarify"), None)
 
+    def phase_limit(phase, remaining):
+        if phase == "gather" and phase not in overrides:
+            return int(remaining * GATHER_BUDGET_FRACTION)
+        return min(remaining, overrides.get(phase, REVISION_CAPS.get(phase, remaining)))
+
+    limits = " ".join(f"{phase}={phase_limit(phase, cap)}" for phase in selected)
+    record("-", stage, 0, "start", f"max-tokens={cap} {limits}")
+
     def run_phase(name, phase, prompt, extra=""):
-        allowance = cap - total
-        if phase == "gather":
-            allowance = int(allowance * GATHER_BUDGET_FRACTION)
-        limit = min(allowance, REVISION_CAPS.get(phase, allowance))
+        limit = phase_limit(phase, cap - total)
         messages = _phase_messages(case, name, phase, prompt)
         if extra:
             messages[0].content += "\n\n" + extra
@@ -880,6 +897,7 @@ def main():
         if name == "revise":
             command.add_argument("--phases", metavar="LIST", help="Comma-separated phases in the revision workflow")
             command.add_argument("--preflight", action="store_true", help="estimate affordable requests without calling the model")
+        if name in ("revise", "stage1", "stage2"):
             command.add_argument("--phase-cap", action="append", default=[], metavar="NAME=N",
                                  help="Override one selected phase's token cap (repeatable)")
         if name == "run":
@@ -906,7 +924,7 @@ def main():
 
 def _execute(args, parser, receipt):
     if args.command in ("stage1", "stage2"):
-        return _stage(args.case, args.command, args.max_tokens, parser)
+        return _stage(args.case, args.command, args.max_tokens, args.phase_cap, parser)
     if args.command == "replay":
         if args.batch and not args.section:
             parser.error("--batch requires --section")
@@ -932,13 +950,7 @@ def _execute(args, parser, receipt):
         selected = [s.strip() for s in args.phases.split(",")] if args.phases is not None else list(phase_caps)
         if len(set(selected)) != len(selected) or any(s not in phase_caps for s in selected):
             parser.error("--phases needs distinct names from " + ", ".join(phase_caps))
-        overrides = {}
-        for spec in args.phase_cap:
-            name, _, value = spec.partition("=")
-            if name not in selected or name in overrides or not re.fullmatch(r"[0-9]+", value) or int(value) < 1:
-                parser.error("--phase-cap needs one selected NAME=positive_integer per override")
-            overrides[name] = int(value)
-        phase_caps.update(overrides)
+        phase_caps.update(_phase_overrides(args.phase_cap, selected, parser))
     remaining = args.max_tokens
     total = 0
     folder = args.case / "work/runs"
