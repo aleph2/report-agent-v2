@@ -99,3 +99,74 @@ def test_run_signals_keep_feedback_and_distinguish_touched_from_resolved(tmp_pat
     monkeypatch.setattr(sys, "argv", ["reportagent", "learn", "feedback", "--case", str(tmp_path), "--input", str(file)])
     cli.main()
     assert json.loads(signal.read_text())["S5"]["F1"]["status"] == "resolved-by-owner"
+
+def test_propose_and_adopt_client_lessons(tmp_path, monkeypatch, capsys):
+    import pytest
+    from langchain_core.messages import AIMessage
+    from reportagent.export.docx import _settings, _xlsx
+    from tests.fake_model import ScriptedModel, call
+
+    case = tmp_path / "cases" / "Synthetic"
+    library = tmp_path / "lessons"
+    (case / "out").mkdir(parents=True)
+    library.mkdir()
+    (library / "lessons.md").write_text("Earlier adopted lesson.\n")
+    template = case / "commission/template"
+    template.mkdir(parents=True)
+    (template / "settings.txt").write_text("xlsx_file: check.xlsx\nsheet_columns: Answer|Id|Basis|Impact|Question\n"
+                                           "sheet_fields: answer|number|sources|effect|question\n")
+    cfg = _settings(case)
+    _xlsx(case / "out/check.xlsx", cfg["sheet_columns"].split("|"), [["amber", 17, "sheet B", "timing", "Which lamp?"]], cfg)
+    kinds = ["FIXED", "DEFAULT", "GENERAL", "ASKING", "PROJECT", "GENERAL", "GENERAL"]
+    blocks = [f"lesson: synthetic lesson {i}.\nkind: {kind}\nsources: Q17\napplies: clarify-section\nstatus: proposed"
+              for i, kind in enumerate(kinds)]
+    target = case / "work/learn/proposals.md"
+    write = call("write_file", file_path="/work/learn/proposals.md", content="\n---\n".join(blocks).replace("status: proposed", "status: adopted"))
+    wrong = call("write_file", file_path="/commission/forbidden.md", content="wrong")
+    usage = dict(input_tokens=6, output_tokens=1, total_tokens=7)
+    model = ScriptedModel(responses=[m.model_copy(update={"usage_metadata": usage}) for m in (wrong, write, AIMessage(content="Saved"))])
+    def invoke(action, *opts):
+        monkeypatch.setattr(sys, "argv", ["reportagent", "learn", action, "--case", str(case), *opts])
+        cli.main()
+    monkeypatch.setattr(cli, "make_model", lambda phase, *, offline=False: model if offline else pytest.fail("paid dispatch"))
+    invoke("propose", "--max-tokens", "100000", "--preflight")
+    assert "conservative_floor_3=" in capsys.readouterr().out and not (case / "work").exists()
+    with pytest.raises(SystemExit):
+        invoke("propose", "--max-tokens", "10")
+    monkeypatch.setattr(cli, "make_model", lambda phase, **options: model)
+    invoke("propose", "--max-tokens", "100000")
+    assert target.read_text().count("status: proposed") == len(blocks) and not (case / "commission/forbidden.md").exists()
+    invoke("adopt", "--library", str(library))
+    assert (library / "lessons.md").read_text() == "Earlier adopted lesson.\n"
+    transcript, = (case / "work/runs").glob("*-learn.jsonl")
+    first = json.loads(transcript.read_text().splitlines()[0])["content"]
+    assert all(value in first for value in ["17", "amber", "sheet B", "Which lamp?", "timing", "Earlier adopted lesson.", "gather-evidence"])
+    signal, = (case / "work/learn/signals").glob("*.json")
+    saved = json.loads(signal.read_text())
+    assert saved["header"]["total_tokens"] == 21 and saved["S7"][0]["saved"]
+    owner = ["adopted", "edited", "adopted", "adopted", "adopted", "rejected", "proposed"]
+    target.write_text("\n---\n".join(b.replace("status: proposed", f"status: {v}") for b, v in zip(blocks, owner)))
+    invoke("adopt", "--library", str(library))
+    doc = (library / "lessons.md").read_text()
+    assert all(f"synthetic lesson {i}." in doc for i in range(4))
+    assert all(f"synthetic lesson {i}." not in doc for i in range(4, 7))
+    assert "Earlier adopted lesson." in doc and "Synthetic" in doc
+    invoke("adopt", "--library", str(library))
+    assert (library / "lessons.md").read_text() == doc
+
+    with pytest.raises(SystemExit, match="outside"):
+        invoke("adopt", "--library", str(Path(cli.__file__).parent / "private-lessons"))
+    offered = []
+    original_bind = ScriptedModel.bind_tools
+    def capture(self, tools, **kwargs):
+        offered.append([tool.name for tool in tools])
+        return original_bind(self, tools, **kwargs)
+    monkeypatch.setattr(ScriptedModel, "bind_tools", capture)
+    reviewed = target.read_bytes()
+    model = ScriptedModel(responses=[
+        wrong.model_copy(update={"usage_metadata": dict(input_tokens=35000, output_tokens=1000, total_tokens=36000)}),
+        write.model_copy(update={"usage_metadata": usage})])
+    invoke("propose", "--max-tokens", "100000")
+    assert "read_file" in offered[0] and offered[-1] == ["write_file"]
+    archive, = target.parent.glob("proposals-*.md")
+    assert archive.read_bytes() == reviewed and target.read_text().count("status: proposed") == len(blocks)

@@ -18,6 +18,11 @@ tool_policy = "restricted"
 thinking_budget = 6000
 output_reserve = 24000
 
+[learn]
+tool_policy = "restricted"
+thinking_budget = 4000
+output_reserve = 8000
+
 [checks]
 score_arithmetic = true
 
