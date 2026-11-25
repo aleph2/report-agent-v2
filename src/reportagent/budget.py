@@ -14,6 +14,16 @@ from langchain_core.messages.utils import count_tokens_approximately
 
 from .models import PHASE_SETTINGS
 
+CALCULATE_FIRST = "Call calculate_score with the baseline and every scenario first; then save the table using its results."
+
+
+def successful_score(message):
+    try:
+        return (isinstance(message, ToolMessage) and message.name == "calculate_score"
+                and message.status == "success" and bool(json.loads(message.text).get("base")))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
 
 def _image_tokens(block, tile):
     # https://www.alibabacloud.com/help/en/model-studio/vision/ — resized tiles plus two framing tokens.
@@ -92,7 +102,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         if request.state.get("final_save_rule"):
             saves = ("edit_file",) if self.phase in ("revise", "sync") else ("write_file",)
             if self.phase == "rescore":
-                saves = ("write_file", "edit_file")
+                saves = ("write_file", "edit_file") if any(map(successful_score, request.state["messages"])) else ()
                 if not request.state.get("final_calculation_used"):
                     saves += ("calculate_score",)
             request = request.override(tools=[tool for tool in request.tools if getattr(tool, "name", None) in saves])
@@ -178,11 +188,12 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         if state.get("final_save_rule"):
             last = state["messages"][-1]
             if self.phase == "rescore" and total < self.max_tokens and isinstance(last, ToolMessage):
-                if last.name == "calculate_score" and last.status == "success" and not state.get("final_calculation_used"):
+                if successful_score(last) and not state.get("final_calculation_used"):
                     return {"final_calculation_used": True}
                 if last.name in ("write_file", "edit_file") and last.status == "error" and not state.get("final_save_retry_used"):
                     error = last.model_copy(update={"response_metadata": {**last.response_metadata, "rescore_save_retry": True}})
-                    return {"final_save_retry_used": True, "final_calculation_used": True, "messages": [error]}
+                    return {"final_save_retry_used": True, "final_calculation_used": any(map(successful_score, state["messages"])),
+                            "messages": [error]}
             return {"jump_to": "end"}
         if total >= self.max_tokens:
             return self._end(total)
@@ -229,8 +240,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
             self._log(event="response", input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
                       reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning"), total_tokens=reported)
         total = state.get("total_tokens", 0) + (reported or 0)
-        update = {"total_tokens": total, "usage_missing": state.get("usage_missing", False) or reported is None}
-        return update
+        return {"total_tokens": total, "usage_missing": state.get("usage_missing", False) or reported is None}
 
     def after_agent(self, state, runtime):
         reply = state["messages"][-1]

@@ -2,12 +2,17 @@ import json
 
 from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware import ModelCallLimitMiddleware
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import pytest
 
 from reportagent.agent import build_agent
-from reportagent.budget import TokenCapMiddleware
+from reportagent.budget import TokenCapMiddleware, successful_score
 from tests.fake_model import ScriptedModel, call
+
+
+def test_rescore_rejects_malformed_calculator_text():
+    message = ToolMessage(content="unparseable result", name="calculate_score", tool_call_id="calc", status="success")
+    assert successful_score(message) is False
 
 
 def test_token_cap(tmp_path, monkeypatch):
@@ -320,7 +325,7 @@ def test_rescore_final_calculation_can_feed_one_budgeted_save(tmp_path, monkeypa
     cap = TokenCapMiddleware(limit, phase="rescore", guard=True, request_log=log)
     state = build_agent(tmp_path, model, phase="rescore", section="A", middleware=[cap]).invoke(
         {"messages": [("user", "Rescore section A.")]})
-    assert offered[1] == {"calculate_score", "write_file"}
+    assert offered[1] == {"calculate_score"}
     result, = [m for m in state["messages"] if m.type == "tool" and m.name == "calculate_score"]
     assert json.loads(result.text)["base"]["F"] == "50.00"
     decisions = [row["decision"] for line in log.read_text().splitlines() if "decision" in (row := json.loads(line))]
@@ -344,7 +349,7 @@ def test_rescore_failed_final_save_has_one_affordable_retry(tmp_path, monkeypatc
     table.parent.mkdir(parents=True)
     table.write_text("before")
     path = "/" + target
-    first = call("read_file", file_path=path)
+    first = call("calculate_score", scores={"X12": 50}, weights={"X12": 1})
     failed = call("edit_file", file_path=path, old_string="missing", new_string="saved")
     retry = call("edit_file", file_path=path, old_string=retry_match, new_string="saved")
     replies = []
@@ -387,7 +392,8 @@ def test_rescore_failed_final_save_has_one_affordable_retry(tmp_path, monkeypatc
         assert not _updated_in_place(log, target, "rescore")
 
 
-def test_new_rescore_table_can_be_created_on_retry_after_calculation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("early_save", [False, True])
+def test_new_rescore_table_can_be_created_on_retry_after_calculation(tmp_path, monkeypatch, early_save):
     target = "/work/sections/A.table.md"
     (tmp_path / "work/sections").mkdir(parents=True)
     (tmp_path / "index.md").write_text("Evidence")
@@ -397,6 +403,9 @@ def test_new_rescore_table_can_be_created_on_retry_after_calculation(tmp_path, m
         call("write_file", file_path="/work/sections/wrong.table.md", content="Wrong target"),
         call("write_file", file_path=target, content="F=50.00"),
     ]
+    if early_save:
+        scripted[2] = call("write_file", file_path=target, content="premature")
+        scripted[1], scripted[2] = scripted[2], scripted[1]
     replies = [m.model_copy(update={"usage_metadata": dict(input_tokens=35000, output_tokens=100, total_tokens=35100)})
                for m in scripted]
     offered = []
@@ -410,6 +419,35 @@ def test_new_rescore_table_can_be_created_on_retry_after_calculation(tmp_path, m
     cap = TokenCapMiddleware(170000, phase="rescore", guard=True)
     agent = build_agent(tmp_path, ScriptedModel(responses=replies), phase="rescore", section="A", middleware=[cap])
     agent.invoke({"messages": [("user", "Save the assigned table.")]})
-    assert offered[1:] == [{"calculate_score", "write_file"}, {"write_file"}, {"write_file"}]
+    assert offered[1:] == [{"calculate_score"}, {"calculate_score"} if early_save else {"write_file"}, {"write_file"}]
     assert (tmp_path / target.lstrip("/")).read_text() == "F=50.00"
     assert not (tmp_path / "work/sections/wrong.table.md").exists()
+
+
+@pytest.mark.parametrize("action", ["write_file", "edit_file"])
+def test_rescore_save_requires_its_own_successful_calculation(tmp_path, action):
+    import asyncio
+    from reportagent.cli import _updated_in_place
+
+    target = "work/sections/A.table.md"
+    table = tmp_path / target
+    table.parent.mkdir(parents=True)
+    args = {"content": "saved"} if action == "write_file" else {"old_string": "before", "new_string": "saved"}
+    if action == "edit_file":
+        table.write_text("before")
+    def save():
+        return call(action, file_path="/" + target, **args)
+    bad = call("calculate_score", scores={"X12": 50}, weights={"X11": 1})
+    good = call("calculate_score", scores={"X12": 50}, weights={"X12": 1})
+    model = ScriptedModel(responses=[save(), bad, save(), good, save(), AIMessage(content="Done.")])
+    agent = build_agent(tmp_path, model, phase="rescore", section="A")
+    state = {"messages": [("user", "Save the score.")]}
+    result = asyncio.run(agent.ainvoke(state)) if action == "edit_file" else agent.invoke(state)
+    attempts = [m for m in result["messages"] if m.type == "tool" and m.name == action]
+    assert [m.status for m in attempts] == ["error", "error", "success"]
+    assert all(m.text == "Call calculate_score with the baseline and every scenario first; then save the table using its results."
+               for m in attempts[:2])
+    assert table.read_text() == "saved"
+    log = tmp_path / "rescore.jsonl"
+    log.write_text("".join(m.model_dump_json() + "\n" for m in result["messages"]))
+    assert _updated_in_place(log, target, "rescore")
