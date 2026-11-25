@@ -64,6 +64,7 @@ class TokenCapState(AgentState):
     budget_note_sent: NotRequired[bool]
     final_save_rule: NotRequired[str]
     final_calculation_used: NotRequired[bool]
+    final_save_retry_used: NotRequired[bool]
 
 
 class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
@@ -95,7 +96,8 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
                 if not request.state.get("final_calculation_used"):
                     saves += ("calculate_score",)
             request = request.override(tools=[tool for tool in request.tools if getattr(tool, "name", None) in saves])
-        if not (self.info or self.guard):
+        guard = self.guard or request.state.get("final_save_retry_used", False)
+        if not (self.info or guard):
             return request
         messages = ([request.system_message] if request.system_message else []) + request.messages
         prompt = (messages, tools, request.model)
@@ -109,8 +111,8 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         estimate = base + estimate_input(messages, tools, request.model, chars_per_token)
         remaining = self.max_tokens - request.state.get("total_tokens", 0)
         available = remaining - estimate
-        stop = self.guard and available < self.output_reserve
-        output = None if stop else (available if self.guard else remaining)
+        stop = guard and available < self.output_reserve
+        output = None if stop else (available if guard else remaining)
         self.request_number += 1
         self._log(estimated_input_tokens=estimate, remaining_tokens=remaining, output_reserve=self.output_reserve,
                   max_output_tokens=output, decision="stop" if stop else "send")
@@ -175,10 +177,12 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
         total = state.get("total_tokens", 0)
         if state.get("final_save_rule"):
             last = state["messages"][-1]
-            if (self.phase == "rescore" and not state.get("final_calculation_used") and total < self.max_tokens
-                    and isinstance(last, ToolMessage) and last.name == "calculate_score" and last.status == "success"):
-                # The model needs to see the tool result before it can save those numbers.
-                return {"final_calculation_used": True}
+            if self.phase == "rescore" and total < self.max_tokens and isinstance(last, ToolMessage):
+                if last.name == "calculate_score" and last.status == "success" and not state.get("final_calculation_used"):
+                    return {"final_calculation_used": True}
+                if last.name in ("write_file", "edit_file") and last.status == "error" and not state.get("final_save_retry_used"):
+                    error = last.model_copy(update={"response_metadata": {**last.response_metadata, "rescore_save_retry": True}})
+                    return {"final_save_retry_used": True, "final_calculation_used": True, "messages": [error]}
             return {"jump_to": "end"}
         if total >= self.max_tokens:
             return self._end(total)

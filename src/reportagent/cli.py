@@ -970,8 +970,18 @@ def _stage_messages(case, name, phase, prompt, lessons, extra):
 def _updated_in_place(log, target, phase):
     # The draft and preliminary questions can exist before their final phase starts.
     messages = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    operations = [ok for _, call, ok in learn.file_operations(learn.recorded_turns(messages))
-                  if call["args"].get("file_path", "").lstrip("/") == target]
+    turns = learn.recorded_turns(messages)
+    operations = []
+    retry_at = None
+    for turn, call, ok in learn.file_operations(turns):
+        if call["args"].get("file_path", "").lstrip("/") != target:
+            continue
+        reply = turns[turn-1][1].get(call["id"], {})
+        if reply.get("response_metadata", {}).get("rescore_save_retry"):
+            retry_at = len(operations)
+        operations.append(ok)
+    if phase == "rescore" and retry_at == len(operations)-2 and operations[-2:] == [False, True]:
+        operations.pop(retry_at)
     if phase in ("clarify", "rescore"):
         return bool(operations) and all(operations)
     # A clean no-edit decision is possible; a budget stop after a partial edit is unfinished.
