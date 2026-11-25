@@ -361,12 +361,23 @@ def _score_arithmetic(path):
     if not compared:
         yield f"{path.stem}: table F/grade {display}/{grade}; no comparable baseline statement found"
 
-_SCORE_IDS = ("X11", "X12", "X21", "X22", "X23", "X31", "X32", "X41", "X42", "X51", "X52")
+_WEIGHTS = {key: Decimal(value) for key, value in PHASE_SETTINGS["grading"]["weights"].items()}
 _DECIMAL_CELL = r"(?:\d+(?:\.\d+)?|\.\d+)"
+_SCENARIO_LABEL = r"情景[\[【]([^\]】]+)[\]】]"
+_GRADE_TOKEN = r"(?<![A-Za-z])(?:IV|III|II|I)\s*级"
+_CUTOFF = r"(?:\d+(?:\.\d+)?\s*[<≤]\s*)?F\s*[<>≤≥]=?\s*\d+(?:\.\d+)?"
+# Strip a threshold together with its own grade, on either side of the inequality.
+_THRESHOLD = re.compile(rf"{_GRADE_TOKEN}\s*(?:\([^()]*\)|[极高中低度风险]*)(?:\s*){_CUTOFF}"
+                        rf"|{_CUTOFF}\s*(?:为|对应)?\s*{_GRADE_TOKEN}", re.I)
+_F_MARK = re.compile(r"(?<![A-Za-z0-9])F\s*(?:值\s*)?(?:[:=为]|is\b)\s*", re.I)
+_OPERAND = rf"[-−]?{_DECIMAL_CELL}(?:\(X\d{{2}}\))?"
+_EXPANSION = re.compile(rf"(?:(?:{_OPERAND})(?:\s*[+*×·/÷−-]\s*(?:{_OPERAND}))+|[Σ∑][\w·×*]+)", re.I)
 
 
 def _score_text(line):
-    return unicodedata.normalize("NFKC", re.sub(r"</?su[bp]>|\*\*|\*([RXF])\*", r"\1", line)).strip()
+    text = unicodedata.normalize("NFKC", line)
+    text = re.sub(r"</?su[bp]>|\*\*|__", "", text)
+    return re.sub(r"(?<![0-9])([*_])(?=\S)(.+?)(?<=\S)\1(?![0-9])", r"\2", text).strip()
 
 
 def _scoring_table(lines):
@@ -400,6 +411,91 @@ def _score_excerpt(lines):
     return "\n".join(excerpt)
 
 
+def _score_slot(lines, checked_lines=None):
+    frame = _scoring_table(lines)
+    if not frame or _scoring_table(lines[frame[1]:]):
+        return None
+    start, end, _ = frame
+    # Only the contiguous score declarations below the rows belong to the slot.
+    for i in range(end, len(lines)):
+        line = _score_text(lines[i])
+        if line and not re.match(r"基准\s*F\s*[:=为]|" + _SCENARIO_LABEL + r"\s*R\d{2}\s*=", line):
+            break
+        if line:
+            if checked_lines is not None and lines[i].rstrip("\r\n") not in checked_lines:
+                # A prose paragraph can begin with a score. Replace only a standalone declaration.
+                if not re.fullmatch(r"(?:基准|" + _SCENARIO_LABEL + r"(?:\s*R\d{2}\s*=\s*" + _DECIMAL_CELL
+                                    + r"[ 、,]*)+)\s*F\s*[:=为]\s*" + _DECIMAL_CELL + r"[ ,(]*(?:为)?"
+                                    + _GRADE_TOKEN + r"[) 。.]*", line):
+                    break
+            end = i + 1
+    return start, end
+
+
+def _sync_table(section, handoff):
+    lines, checked = section.splitlines(keepends=True), handoff.splitlines()
+    slot, source = _score_slot(lines, set(checked)), _score_slot(checked)
+    if not slot or not source or _table_gate(handoff):
+        return section
+    start, end = slot
+    newline = "\r\n" if lines[start].endswith("\r\n") else "\n"
+    block = newline.join(checked[slice(*source)])
+    ending = newline if lines[end-1].endswith("\n") else ""
+    return "".join(lines[:start]) + block + ending + "".join(lines[end:])
+
+
+def _prose_results(line):
+    """Associate written results with their baseline or explicitly named scenarios."""
+    for sentence in re.split(r"[。;]", _THRESHOLD.sub("", _score_text(line))):
+        sentence = re.sub(rf"{_GRADE_TOKEN}\s*(?:及以上|及以下|上限|下限|界限|或{_GRADE_TOKEN})", "", sentence)
+        # A range can introduce each named endpoint with its grade before the opening parenthesis.
+        sentence = re.sub(rf"({_GRADE_TOKEN})\s*\(({_SCENARIO_LABEL})\s*(F\s*=\s*{_DECIMAL_CELL})\)",
+                          r"(\2 \4, \1)", sentence)
+        parts = re.split(_SCENARIO_LABEL + r"|(?=(?:基准\s*F\s*[:=为]|本坡基准(?:为|等级)))", sentence)
+        joined, named_results = [], []
+        for name, clause in zip(["", *parts[1::2]], parts[::2]):
+            name = name or ""
+            if name and clause.strip() in ("与", "和", "及"):
+                joined.append(name)
+                continue
+            scores = []
+            ambiguous = bool(name and clause.strip() in ("、", ",") and _F_MARK.search(sentence))
+            for mark in _F_MARK.finditer(clause):
+                tail = clause[mark.end():]
+                while formula := _EXPANSION.match(tail):
+                    tail = tail[formula.end():].lstrip()
+                    if not tail.startswith("="):
+                        tail = ""
+                        break
+                    tail = tail[1:].lstrip()
+                if not tail and formula:
+                    continue
+                value = re.match(r"-?" + _DECIMAL_CELL, tail)
+                if value and not re.match(r"\s*[~至–—-]\s*-?\d", tail[value.end():]):
+                    scores.append(Decimal(value[0]))
+                else:
+                    ambiguous = True
+            written = list(_risk_statements(clause))
+            if not _F_MARK.search(clause):
+                scores.extend(v for _, v, _ in written if v is not None)
+            grades = [g for _, _, g in written if g]
+            for match in re.finditer(_GRADE_TOKEN, clause, re.I):
+                before = clause[:match.start()].rstrip()
+                attached = scores and re.search(r"\d[\s(),、]*(?:对应|(?:仍|已)?为|已达|升|降)?\s*$", before)
+                assigned = re.search(r"(?:本坡|本段|本节|基准|风险等级)(?:风险|总体|等级|仍|判定|评定|属于|维持|为|是|达|\s)*$", before)
+                if not before or attached or assigned or name and re.search(r"(?:为|属|维持|对应|升|降)$", before):
+                    grades.append(match[0].removesuffix("级").strip().upper())
+            for subject in [*joined, name]:
+                yield subject, scores, grades, ambiguous
+                if subject and scores:
+                    named_results.append(subject)
+            joined.clear()
+            pooled = re.search(r"(?:均为|均属|均对应)\s*(" + _GRADE_TOKEN + ")", clause)
+            if pooled:
+                for subject in named_results:
+                    yield subject, [], [pooled[1].removesuffix("级").strip().upper()], False
+
+
 def _table_gate(text, handoff=None, calculations=None):
     """Compare numeric assertions to the saved baseline and named scenario overrides."""
     lines = text.splitlines()
@@ -424,21 +520,26 @@ def _table_gate(text, handoff=None, calculations=None):
             continue
         key = "X" + match[1]
         r, w, x = (Decimal(cells[i]) for i in (r_col, w_col, x_col))
-        if key in values or key not in _SCORE_IDS or not (0 <= r <= 100 and 0 <= w <= 1):
+        if key in values or key not in _WEIGHTS or not (0 <= r <= 100 and 0 <= w <= 1):
             errors.append(f"line {n+1}: duplicate/unknown indicator or out-of-range R/weight for {key}")
             continue
         values[key], weights[key] = r, w
+        if w != _WEIGHTS[key]:
+            errors.append(f"line {n+1}: {key} weight {w} should be {_WEIGHTS[key]}")
         product = score_result(r*w)["F"]
         if x != Decimal(product):
             errors.append(f"line {n+1}: {key} weighted X should be {product}")
-    if set(values) != set(_SCORE_IDS):
+    if set(values) != set(_WEIGHTS):
         errors.append(f"line {start+1}: expected the eleven distinct indicators")
     if sum(weights.values()) != 1:
         errors.append(f"line {start+1}: weights sum to {sum(weights.values())}, expected 1.00")
     if errors:
         return errors
-    if handoff is not None and handoff.strip() not in text:
-        errors.append(f"line {start+1}: section does not contain the complete checked table and results")
+    if handoff is not None:
+        checked = handoff.splitlines()
+        slot = _score_slot(checked)
+        if not slot or lines[start:start+slot[1]-slot[0]] != checked[slice(*slot)]:
+            errors.append(f"line {start+1}: section does not contain the complete checked table and results")
 
     def result(rows):
         return score_result(sum(v * weights[k] for k, v in rows.items()))
@@ -446,10 +547,9 @@ def _table_gate(text, handoff=None, calculations=None):
     baseline = result(values)
     scenarios = {}
     required = [values]
-    label = r"情景[\[【]([^\]】]+)[\]】]"
     for n, raw in enumerate((handoff if handoff is not None else text).splitlines(), 1):
         line = _score_text(raw)
-        scenario = re.match(label, line)
+        scenario = re.match(_SCENARIO_LABEL, line)
         if not scenario:
             continue
         changes = re.findall(r"\bR(\d{2})\s*=\s*(" + _DECIMAL_CELL + r")", line)
@@ -468,43 +568,27 @@ def _table_gate(text, handoff=None, calculations=None):
                 errors.append(f"line {start+1}: baseline or scenario inputs missing from successful calculate_score results")
     seen_f = set()
     seen_grade = set()
+    _, results_end = _score_slot(lines)
     for n, raw in enumerate(lines):
         if n in (start, start+1):
             continue
         if start+1 < n < end and n not in summaries:
             raw = raw.strip().strip("|").split("|")[-1]
-        for clause in re.split(r"[。；;]", _score_text(raw)):
-            scenario = re.search(label, clause)
-            name = scenario[1] if scenario else ""
+        for name, scores, grades, ambiguous in _prose_results(raw):
             expected = scenarios.get(name) if name else baseline
-            # Remove threshold definitions, retaining any adjacent statement about this slope.
-            clause = re.sub(r"(?:IV|III|II|I)\s*级[^,，;。()]{0,10}F\s*[<>≤≥]\s*\d+(?:\.\d+)?", "", clause)
-            clause = re.sub(r"(?:\d+(?:\.\d+)?\s*[<≤]\s*)?F\s*[<>≤≥]\s*\d+(?:\.\d+)?\s*(?:为|对应)?\s*(?:IV|III|II|I)级", "", clause)
-            grades = re.findall(r"(?<![A-Za-z])((?:IV|III|II|I))\s*级", clause, re.I)
-            statements = list(_risk_statements(clause))
-            grades.extend(g for _, _, g in statements if g)
-            scores = [value for _, value, _ in statements if value is not None]
-            marks = list(re.finditer(r"(?<![A-Za-z])F\s*[=:为]\s*", clause, re.I))
-            for m in marks.copy():
-                formula = re.match(r"(?:[Σ∑]|sum\b)[^,，;。]*", clause[m.end():], re.I)
-                if formula:
-                    last = formula[0].rsplit("=", 1)
-                    if len(last) == 2 and (v := re.match(_DECIMAL_CELL, last[1].strip())):
-                        scores.append(Decimal(v[0]))
-                    elif len(last) == 1:
-                        marks.remove(m)
-            if (len(marks) > len(scores) or re.search(r"\bF\s*=\s*[\d.]+\s*[~～至–—]\s*[\d.]+", clause)):
-                errors.append(f"line {n+1}: ambiguous F statement; state each endpoint as a named scenario")
+            if ambiguous:
+                errors.append(f"line {n+1}: ambiguous F statement for {name or 'baseline'}; state each endpoint as a named scenario")
             if not scores and not grades:
                 continue
             if expected is None:
                 errors.append(f"line {n+1}: unknown scenario {name}")
                 continue
-            if scores:
-                seen_f.add(name)
-            if grades:
-                seen_grade.add(name)
-            if any(v != Decimal(expected["F"]) for v in scores) or any(g.upper() != expected["grade"] for g in grades):
+            if end <= n < results_end:
+                if scores:
+                    seen_f.add(name)
+                if grades:
+                    seen_grade.add(name)
+            if any(v != Decimal(expected["F"]) for v in scores) or any(g != expected["grade"] for g in grades):
                 errors.append(f"line {n+1}: expected {name or 'baseline'} F={expected['F']}, {expected['grade']}级")
     for name in ("", *scenarios):
         if name not in seen_f or name not in seen_grade:
@@ -1138,7 +1222,8 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
                 elif phase in ("revise", "sync"):
                     key = answers_key if phase == "revise" else context_key + table.read_bytes()
                     signature = sha256(key + body.read_bytes()).hexdigest()
-                    if completed.get((name, phase)) == signature:
+                    if completed.get((name, phase)) == signature and (phase != "sync" or not _table_gate(
+                            body.read_text(encoding="utf-8-sig"), table.read_text(encoding="utf-8-sig"))):
                         continue
                 elif phase != "clarify" or (name, "review") not in completed or (name, phase) in completed:
                     continue
@@ -1155,12 +1240,24 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
             done = target.is_file()
             if existed or phase == "rescore":
                 done = done and _updated_in_place(log, target.relative_to(case).as_posix(), phase)
-                if phase in ("revise", "sync"):
-                    key = answers_key if phase == "revise" else context_key + table.read_bytes()
-                    signature = sha256(key + body.read_bytes()).hexdigest()
+                if phase == "revise":
+                    signature = sha256(answers_key + body.read_bytes()).hexdigest()
             if phase in ("rescore", "sync") and target.is_file():
                 handoff = table.read_text(encoding="utf-8-sig")
-                findings = _table_gate(target.read_text(encoding="utf-8-sig"), handoff if phase == "sync" else None,
+                data = target.read_bytes()
+                encoding = "utf-8-sig" if data.startswith(b"\xef\xbb\xbf") else "utf-8"
+                text = data.decode(encoding)
+                if phase == "sync":
+                    synced = _sync_table(text, handoff)
+                    if synced != text:
+                        with TemporaryDirectory(dir=target.parent) as directory:
+                            saved = Path(directory) / target.name
+                            saved.write_bytes(synced.encode(encoding))
+                            saved.chmod(target.stat().st_mode & 0o777)
+                            saved.replace(target)
+                    signature = sha256(context_key + table.read_bytes() + target.read_bytes()).hexdigest()
+                    text = synced
+                findings = _table_gate(text, handoff if phase == "sync" else None,
                                        _calculated_inputs(log) if phase == "rescore" else None)
                 if phase == "rescore":
                     signature = sha256(context_key + table.read_bytes()).hexdigest()

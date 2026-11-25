@@ -1,3 +1,4 @@
+from decimal import Decimal
 from importlib.resources import files
 import json
 import sys
@@ -235,8 +236,22 @@ def test_stage_section_selection(tmp_path, monkeypatch, capsys):
     assert (tmp_path / ".stage2-complete").is_file()
 
 
+# Synthetic fixtures use the eleven fractional weights in the published ranking.
+WEIGHTS = {
+    "X11": ".17", "X21": ".16", "X12": ".14", "X22": ".12", "X41": ".11", "X31": ".09",
+    "X32": ".07", "X42": ".06", "X23": ".04", "X51": ".03", "X52": ".01",
+}
+
+
+def score_rows(scores=None, weights=None):
+    rows = ["| 指标 | 档位 | 基本分值范围 | Rij | γij | Xij | 依据 |", "|---|---|---|---|---|---|---|"]
+    for key, weight in (weights or WEIGHTS).items():
+        r = (scores or {}).get(key, "40")
+        rows.append(f"| {key} | B | 25–49 | {r} | {weight} | {Decimal(r) * Decimal(weight):.2f} | evidence |")
+    return "\n".join(rows)
+
+
 def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, capsys):
-    from decimal import Decimal
     case = tmp_path
     work = case / "work"
     sections = work / "sections"
@@ -248,14 +263,10 @@ def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, cap
     library = tmp_path / "library"
     library.mkdir()
     (library / "lessons.md").write_text("Library sentinel")
-    ids = "11 12 21 22 23 31 32 41 42 51 52".split()
-    weights = dict(zip(("X" + k for k in ids), [".17",".14",".16",".12",".04",".09",".07",".11",".06",".03",".01"]))
+    weights = WEIGHTS
     scores = dict.fromkeys(weights, "40")
-    rows = ["| 指标 | 档位 | 基本分值范围 | Rij | γij | Xij | 取值说明 |", "|---|---|---|---|---|---|---|"]
-    for key, value in weights.items():
-        rows.append(f"| {key} | B | 25–49 | 40 | {value} | {40 * Decimal(value):.2f} | [合成资料, page 1] |")
-    table = "\n".join(rows) + "\n\n基准 F=40.00，Ⅱ级。"
-    old = table.replace("40.00，Ⅱ级", "55.00，Ⅲ级")
+    table = score_rows() + "\n\n基准 F=40.00，Ⅱ级。"
+    old = table.replace("evidence", "unverified").replace("40.00，Ⅱ级", "55.00，Ⅲ级")
     body = sections / "A.md"
     body.write_text("# A\n\nPrivate prose sentinel\n\n## 适用性\n适用行 sentinel\n\n## 评分\n" + old + "\n\n本坡为Ⅲ级。")
     commission = case / "commission"
@@ -274,7 +285,7 @@ def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, cap
             ops = [call("calculate_score", scores=scores, weights=weights, include_products=True),
                    call("write_file", file_path="/work/sections/A.table.md", content=table)]
         elif phase == "sync":
-            before, after = (old, table) if phases.count("sync") == 1 else ("本坡为Ⅲ级。", "本坡为Ⅱ级。")
+            before, after = ("适用行 sentinel", "核实后的适用行") if phases.count("sync") == 1 else ("本坡为Ⅲ级。", "本坡为Ⅱ级。")
             ops = [call("edit_file", file_path="/work/sections/A.md", old_string=before, new_string=after)]
         else:
             raise AssertionError(phase)
@@ -287,6 +298,7 @@ def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, cap
     assert "rescore=450000 sync=200000" in progress
     assert f"line {last_line}" in progress and "\tunfinished\t" in progress and f"line {last_line}" in capsys.readouterr().out
     assert not (case / ".stage2-complete").exists()
+    assert table in body.read_text() and "unverified" not in body.read_text()
     def first(phase):
         path, = (work / "runs").glob("*-" + phase + ".jsonl")
         return json.loads(path.read_text().splitlines()[0])["content"]
@@ -309,11 +321,8 @@ def test_stage2_reviewer_notes_invalidate_both_phases(tmp_path, monkeypatch):
     review = work / "reviews/A.notes.md"
     review.parent.mkdir()
     (review.parent / "B.notes.md").write_text("Another section's review")
-    weights = {key: ".09" for key in cli._SCORE_IDS}
-    weights["X11"] = ".10"
-    rows = ["| 指标 | Rij | γij | Xij |", "|---|---|---|---|"]
-    rows.extend(f"| {key} | 40 | {weight} | {40 * float(weight):.2f} |" for key, weight in weights.items())
-    table = "\n".join(rows) + "\n基准 F=40.00，Ⅱ级。"
+    weights = WEIGHTS
+    table = score_rows() + "\n基准 F=40.00，Ⅱ级。"
     (sections / "A.table.md").write_text(table)
     (sections / "A.md").write_text("# A\n\n" + table)
 
@@ -351,20 +360,19 @@ def test_stage2_reviewer_notes_invalidate_both_phases(tmp_path, monkeypatch):
 
 
 def test_table_gate_product_weight_boundary_scenarios_and_scope(tmp_path):
-    rows = ["| 指标 | 档位 | 基本分值范围 | Rij | γij | Xij | 取值说明 |", "|---|---|---|---|---|---|---|"]
-    for i, k in enumerate(cli._SCORE_IDS):
-        rows.append(f"| {k} | B | 25–49 | {30.001 if i == 0 else 30} | {'.50' if i == 0 else '.05'} | {15 if i == 0 else 1.5} | evidence |")
-    text = "\n".join(rows) + "\n基准 F=30.00，Ⅱ级。\n情景[低] R11=29，F=29.50，Ⅰ级。"
+    scores = dict.fromkeys(WEIGHTS, "30")
+    scores["X11"] = "30.001"  # Rounded F is 30, but the grade uses the unrounded value.
+    text = score_rows(scores) + "\n基准 F=30.00，Ⅱ级。\n情景[低] R11=29，F=29.83，Ⅰ级。"
     assert cli._table_gate(text) == []
-    for modified, error in [(text.replace("| 15 |", "| 14.9 |"), "weighted X"),
-                            (text.replace(".05 | 1.5", ".04 | 1.2", 1), "weights sum"),
+    for modified, error in [(text.replace("| 5.10 |", "| 5.00 |"), "weighted X"),
+                            (text.replace(".04 | 1.20", ".03 | 0.90", 1), "weights sum"),
                             (text.replace("X52", "X51"), "duplicate"),
-                            (text.replace("29.50", "30.00"), "低 F="),
+                            (text.replace("29.83", "30.00"), "低 F="),
                             (text + "\n本坡维持Ⅲ级。", "baseline F="),
                             (text + "\nF=ΣX=31.15，Ⅱ级。", "baseline F="),
                             (text.replace("30.00，Ⅱ", "30.00，Ⅰ"), "baseline F=")]:
         assert any(error in line for line in cli._table_gate(modified)), (error, modified)
-    assert cli._table_gate(text + "\n情景[低] F=29.50，Ⅰ级。", text) == []
+    assert cli._table_gate(text + "\n情景[低] F=29.83，Ⅰ级。", text) == []
     assert cli._table_gate(text.replace("evidence", "different", 1), text)
     assert cli._table_gate(text, calculations=[])
     from reportagent.agent import PhaseTools
@@ -377,3 +385,65 @@ def test_table_gate_product_weight_boundary_scenarios_and_scope(tmp_path):
         assert denied("read_file", "/commission/unrelated.txt").status == "error"
         assert (denied("read_file", "/sources/a/page.png") is None) == (phase == "rescore")
         assert (denied("calculate_score", "") is None) == (phase == "rescore")
+
+
+def test_table_gate_requires_the_assigned_weight_even_if_sum_and_products_agree():
+    swapped = dict(WEIGHTS, X12=WEIGHTS["X23"], X23=WEIGHTS["X12"])
+    errors = cli._table_gate(score_rows(weights=swapped) + "\n基准 F=40.00，Ⅱ级。")
+    for key in ("X12", "X23"):
+        assert any(key in line for line in errors), errors
+
+
+def test_gate_reads_formatted_results_and_scopes_each_named_scenario():
+    handoff = score_rows() + (
+        "\n基准 F=40.00，Ⅱ级。\n情景[加深] R11=100，F=50.20，Ⅲ级。\n情景[减浅] R11=0，F=33.20，Ⅱ级。"
+    )
+    prose = (
+        "\n按 F＝ΣXij 计算。Ⅳ级（极高）F＞60；45＜F≤60 为Ⅲ级；Ⅱ级（中度）30＜F≤45。"
+        "\n基础结果 **F**＝36＋4＝**40.00**（Ⅱ级）。另列计算过程 F＝36＋4。"
+        "\n情况分别为情景[加深] _F_＝50.20，为**Ⅲ级**、情景[减浅]（F＝33.20）为Ⅱ级。"
+    )
+    assert cli._table_gate(handoff + prose, handoff) == []
+    for original, wrong in (("50.20，为", "50.21，为"), ("为**Ⅲ级**", "为**Ⅱ级**"),
+                            ("**40.00**（Ⅱ级）", "**41.00**（Ⅱ级）"),
+                            ("33.20）为Ⅱ级", "33.20）为Ⅰ级"),
+                            ("F＝33.20）", "F＝-33.20）")):
+        assert cli._table_gate(handoff + prose.replace(original, wrong), handoff), wrong
+
+    shared = "情景[加深] F＝50.20、情景[减浅] F＝33.20，两种情景均为Ⅱ级。"
+    assert any("加深" in err for err in cli._table_gate(handoff + "\n" + shared, handoff))
+    compatible = handoff + "\n情景[微调] R11=50，F=41.70，Ⅱ级。"
+    shared_ok = "情景[微调] F＝41.70、情景[减浅] F＝33.20，两种情景均为Ⅱ级。"
+    assert cli._table_gate(compatible + "\n" + shared_ok, compatible) == []
+    adjacent = "规定 F＞60 为Ⅳ级，本坡 F＝40.00，为Ⅱ级。"
+    assert cli._table_gate(handoff + "\n" + adjacent, handoff) == []
+    for wrong in (adjacent.replace("40.00", "42.00"), adjacent.replace("为Ⅱ级", "为Ⅲ级")):
+        assert cli._table_gate(handoff + "\n" + wrong, handoff), wrong
+
+    separate = handoff + "\n结果分别为情景[加深]、情景[减浅] F=33.20。"
+    assert any("加深" in error for error in cli._table_gate(separate, handoff))
+    assert not cli._table_gate(handoff + "\n可另见情景[加深]、情景[减浅]。", handoff)
+
+    missing = handoff.replace("R11=100，F=50.20", "R11=100")
+    errors = cli._table_gate(missing + "\n并列记录情景[加深]、情景[减浅] F=33.20。")
+    assert any("加深" in error and "missing" in error for error in errors), errors
+    assert any("missing" in e for e in cli._table_gate(missing + "\n另处提及情景[加深] F=50.20，Ⅲ级。"))
+
+
+def test_sync_table_places_one_checked_block_and_keeps_editorial_text():
+    checked = score_rows() + "\n\n基准 F=40.00，Ⅱ级。\n情景[加深] R11=100，F=50.20，Ⅲ级。"
+    handoff = "# 复核用标题\n\n" + checked + "\n\n备注：仅供核查。"
+    typed = checked.replace("evidence", "旧依据").replace("50.20", "51.20")
+    intro, ending = "# 章节\n\n前文。\n\n", "\n\n## 讨论\n保留这句。\n"
+    section = intro + typed + ending
+    synced = cli._sync_table(section, handoff)
+    assert synced == intro + checked + ending
+    assert cli._sync_table(synced, handoff) == synced
+    assert cli._sync_table(section.replace("\n", "\r\n"), handoff) == synced.replace("\n", "\r\n")
+    prose = "基准 F=40.00，Ⅱ级。本段另有独立的现场说明。"
+    prose_section = intro + score_rows() + "\n\n" + prose + ending
+    assert cli._sync_table(prose_section, handoff) == intro + checked + "\n\n" + prose + ending
+    for ambiguous in (intro + ending, section + "\n" + typed):
+        assert cli._sync_table(ambiguous, handoff) == ambiguous
+    invalid = handoff.replace("| .17 | 6.80 |", "| .16 | 6.40 |")
+    assert cli._sync_table(section, invalid) == section
