@@ -33,7 +33,7 @@ An agent system that writes an assessment report from supplied source documents 
 
 | Measure | Budget |
 |---|---|
-| Our own code in `src/reportagent/`, excluding `export/` | 3,125 lines |
+| Our own code in `src/reportagent/`, excluding `export/` | 3,140 lines |
 | Ported code in `src/reportagent/export/` | 1,700 lines |
 | Modules | 7 plus `export/` |
 | Our own tools | 7 |
@@ -70,3 +70,5 @@ Going over a budget needs the owner's decision, recorded below.
 - Task 133 (2026-11-25): Under the owner's delegation, Claude added 900,000 tokens (1,238,885 to 2,138,885), then another 500,000 after a 210,583-token run (1,928,302 to 2,428,302). The withdrawn task-132 run used 303,699, leaving 2,124,603. On 2026-11-24 the owner raised the remaining allowance by 1,200,000 to 3,324,603. Stage 2 now defaults to 450,000 for rescore and 200,000 for sync. Five sections at 650,000 each would use up to 3,250,000. Only one 04-4 invocation is authorized after task 133 review, merge and tag. Under the owner's delegation, Claude raised the core limit from 3,050 to 3,100 lines for metric simplification of drawing profiles.
 
 - Task 134 (2026-11-25): Record the client's confirmation as an indexed source in the private case materials. Under the owner's delegation, Claude raised the core limit from 3,100 to 3,125 lines for the rescore save and retry.
+
+- Task 136 (2026-11-25): Under the owner's delegation, Claude raised the core limit from 3,125 to 3,140 lines. Rescore may save its assigned table after the calculator has returned a usable result in that phase.

@@ -371,8 +371,8 @@ def test_table_gate_product_weight_boundary_scenarios_and_scope(tmp_path):
     for phase, target in [("rescore", "A.table.md"), ("sync", "A.md")]:
         middleware = PhaseTools(phase, "restricted", tmp_path, "A", ())
         def denied(tool, path):
-            return middleware._denied({"id":"test", "name":tool, "args":{"file_path": path}})
-        assert denied("edit_file", "/work/sections/" + target) is None
+            return middleware._denied({"id":"test", "name":tool, "args":{"file_path": path}}, [])
+        assert (denied("edit_file", "/work/sections/" + target) is None) == (phase == "sync")
         assert denied("edit_file", "/work/sections/B.md").status == "error"
         assert denied("read_file", "/commission/unrelated.txt").status == "error"
         assert (denied("read_file", "/sources/a/page.png") is None) == (phase == "rescore")

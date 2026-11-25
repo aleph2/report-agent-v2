@@ -23,7 +23,7 @@ from langsmith import tracing_context
 
 from . import learn
 from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
-from .budget import TokenCapMiddleware, estimate_input
+from .budget import CALCULATE_FIRST, TokenCapMiddleware, estimate_input
 from .export.docx import (FIXED_FIELDS, _SCENARIO, _VALUE, _plan, _risk_statements, _settings, answered_client_rows,
                           clarification_numbers, export_answers, export_docx, fixed_values, section_flags)
 from .ingest import ingest
@@ -977,6 +977,8 @@ def _updated_in_place(log, target, phase):
         if call["args"].get("file_path", "").lstrip("/") != target:
             continue
         reply = turns[turn-1][1].get(call["id"], {})
+        if phase == "rescore" and not ok and reply.get("content") == CALCULATE_FIRST:
+            continue
         if reply.get("response_metadata", {}).get("rescore_save_retry"):
             retry_at = len(operations)
         operations.append(ok)

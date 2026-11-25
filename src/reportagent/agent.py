@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 from pydantic import Field
 
+from .budget import CALCULATE_FIRST, successful_score
 from .ingest import profile_data
 from .models import PHASE_SETTINGS
 
@@ -120,7 +121,7 @@ class PhaseTools(AgentMiddleware):
     async def awrap_model_call(self, request, handler):
         return await handler(self._model_request(request))
 
-    def _denied(self, call):
+    def _denied(self, call, messages):
         if self.policy != "restricted":
             return None
         if call["name"] in (*self.score_tool, *self.profile_tools):
@@ -130,6 +131,8 @@ class PhaseTools(AgentMiddleware):
         message = "This phase may read /sources/ pages (find them in /index.md) and save its own file."
         if self.two_step:
             if call["name"] in self.actions and path == self.target:
+                if self.phase == "rescore" and not any(map(successful_score, messages)):
+                    return ToolMessage(content=CALCULATE_FIRST, tool_call_id=call["id"], name=call["name"], status="error")
                 return None
             if call["name"] == "read_file" and (path in self.readable or
                     (self.score_tool and (path.is_relative_to(self.case / "sources") or path == self.case / "index.md"))):
@@ -155,10 +158,10 @@ class PhaseTools(AgentMiddleware):
         return request
 
     def wrap_tool_call(self, request, handler):
-        return self._denied(request.tool_call) or handler(self._proposal_status(request))
+        return self._denied(request.tool_call, request.state["messages"]) or handler(self._proposal_status(request))
 
     async def awrap_tool_call(self, request, handler):
-        return self._denied(request.tool_call) or await handler(self._proposal_status(request))
+        return self._denied(request.tool_call, request.state["messages"]) or await handler(self._proposal_status(request))
 
 
 PHASE_SKILLS = {"rescore": "rescore-section", "sync": "sync-section", "learn": "learn-from-answers", "verify-sources": "verify-sources", "review": "review-section",
