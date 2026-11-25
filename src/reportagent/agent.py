@@ -83,6 +83,7 @@ class PhaseTools(AgentMiddleware):
         self.two_step = phase in ("rescore", "sync")
         self.actions = (self.action, "edit_file") if phase == "rescore" else (self.action,)
         self.readable = set()
+        self.phase = phase
         self.policy = policy
         self.case = case.resolve()
         self.supplied = supplied_files
@@ -101,7 +102,10 @@ class PhaseTools(AgentMiddleware):
 
     def _model_request(self, request):
         if self.policy == "restricted":
-            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in ("read_file", *self.actions, *self.score_tool, *self.profile_tools)])
+            allowed = {"read_file", *self.actions, *self.score_tool, *self.profile_tools}
+            if self.phase == "rescore" and request.state.get("final_save_rule") and self.target and not self.target.is_file():
+                allowed.discard("edit_file")
+            return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in allowed])
         if any(isinstance(m, AIMessage) for m in request.messages):
             return request
         # Bailian accepts a named choice only with thinking disabled on this request.
@@ -130,7 +134,8 @@ class PhaseTools(AgentMiddleware):
             if call["name"] == "read_file" and (path in self.readable or
                     (self.score_tool and (path.is_relative_to(self.case / "sources") or path == self.case / "index.md"))):
                 return None
-            return ToolMessage(content="This phase allows only its assigned files and tools.", tool_call_id=call["id"], status="error")
+            return ToolMessage(content="This phase allows only its assigned files and tools.",
+                               tool_call_id=call["id"], name=call["name"], status="error")
         if call["name"] == "read_file":
             if path.is_relative_to(self.case / "sources") or (relative == "index.md" and path == self.case / "index.md"):
                 return None
