@@ -775,7 +775,7 @@
         for (const id of ['stage1', 'stage2']) el(id).setAttribute('aria-pressed', String(id === s))
         el('start').textContent = '运行' + stageLabel(s)
         el('stageDescription').textContent = s === 'stage1' ? '第一阶段：初稿与待澄清清单' : '第二阶段：终稿'
-        el('caps').placeholder = s === 'stage1' ? 'clarify=60000' : 'rescore=260000\nsync=150000'
+        el('caps').placeholder = s === 'stage1' ? 'clarify=60000' : 'rescore=450000\nsync=200000'
       }
       function choose(name) {
         selected = name

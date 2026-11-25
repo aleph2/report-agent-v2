@@ -59,10 +59,14 @@ def _profile_tools(case):
         return profile_data(case, file, page)
 
     @tool
-    def measure_profile(file: str, page: int, x_from: float, x_to: float, layer: str = "dmx") -> dict:
-        """Measure a vector ground profile from toe to crest on a one-based PDF page. Supply signed horizontal
-        offsets in metres using list_profile_layers. Returns signed rise, horizontal run, angle and calibration."""
-        return profile_data(case, file, page, layer, (x_from, x_to))
+    def measure_profile(file: str, page: int, x_from: float, x_to: float, layer: str = "dmx",
+                        min_segment_m: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 2.0,
+                        simplify_m: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0.2) -> dict:
+        """Measure the two-point chord and clipped profile of a chosen PDF layer in metres.
+        Returns raw_piece_count and segments after Douglas–Peucker simplification at tolerance simplify_m.
+        Angles follow the requested direction (verticals follow the path). The steepest segment has the
+        largest absolute angle among simplified segments with horizontal run at least min_segment_m."""
+        return profile_data(case, file, page, layer, (x_from, x_to), min_segment_m, simplify_m)
 
     return [list_profile_layers, measure_profile]
 
