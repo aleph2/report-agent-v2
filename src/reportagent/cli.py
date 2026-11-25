@@ -1096,9 +1096,11 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
         notes = work / "notes" / (name + ".md")
         questions = work / "clarifications" / (name + ".md")
         reviews = work / "reviews"
+        review_file = reviews / (name + ".notes.md")
+        phase_extras = {}
         if stage == "stage2" and any(not p.resolve().is_relative_to(case.resolve())
-                                     for p in (body, notes, body.with_suffix(".table.md"))):
-            parser.error("section tables, section drafts and evidence notes must be inside the case")
+                                     for p in (body, notes, body.with_suffix(".table.md"), review_file)):
+            parser.error("section tables, drafts, evidence notes and reviewer notes must be inside the case")
         if stage == "stage1":
             phases = [(phase, prompt, path) for (phase, prompt), path in zip(_section_phases(name), (notes, body))]
             phases.extend([("verify-sources", None, reviews / (name + "-sources.md")),
@@ -1110,6 +1112,12 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
                 client_rows = _rescore_answers(case, cfg)
             # Sync edits the draft. Only inputs external to sync invalidate its saved handoff.
             context_key = sha256(b"\x00".join((client_rows.encode(), lessons.encode(), notes.read_bytes() if notes.is_file() else b""))).digest()
+            reviewer_notes = ""
+            if review_file.is_file():
+                data = review_file.read_bytes()
+                context_key += sha256(data).digest()
+                reviewer_notes = "Reviewer notes for this section (apply each one; cite the source the note points to; a note never overrides a source or the scoring rules):\n" + data.decode("utf-8-sig")
+            phase_extras = {"sync": reviewer_notes, "rescore": "\n\n".join(filter(None, (client_rows, reviewer_notes)))}
             phases = [("rescore", None, table), ("sync", None, body)]
         else:
             phases = [("revise", None, body)]
@@ -1121,7 +1129,7 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
                     saved_table = table.read_text(encoding="utf-8-sig")
                     signature = sha256(context_key + table.read_bytes()).hexdigest()
                     prior = completed.get((name, phase))
-                    if prior in (None, signature) and not _table_gate(saved_table):
+                    if (prior == signature or (prior is None and not reviewer_notes)) and not _table_gate(saved_table):
                         if prior is None and (not sections or name in sections):
                             record(name, phase, 0, "done", signature)
                         continue
@@ -1140,8 +1148,7 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
                 break
             if phase == "verify-sources":
                 check(case, name)
-            phase_extra = client_rows if phase == "rescore" else extra
-            log, used = run_phase(name, phase, prompt, "" if phase == "sync" else phase_extra)
+            log, used = run_phase(name, phase, prompt, phase_extras.get(phase, extra))
             total += used
             done = target.is_file()
             if existed or phase == "rescore":
