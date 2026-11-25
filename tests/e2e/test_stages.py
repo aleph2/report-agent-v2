@@ -34,6 +34,7 @@ def test_packaged_revise_skill_requires_cross_slope_rules():
     for phase in ("rescore", "sync"):
         text = files("reportagent.skills").joinpath(cli.PHASE_SKILLS[phase], "SKILL.md").read_text(encoding="utf-8")
         assert "\n".join(limits) in text
+        assert "If reviewer notes are supplied, apply each one and state in your final reply which notes you applied." in text
 
 
 def test_two_stages(tmp_path, monkeypatch, capsys):
@@ -290,6 +291,7 @@ def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, cap
         path, = (work / "runs").glob("*-" + phase + ".jsonl")
         return json.loads(path.read_text().splitlines()[0])["content"]
     assert all(v in first("rescore") for v in ("适用行 sentinel", "Evidence sentinel", "Library sentinel", "7: Numbered answer", "section: Elsewhere", "Q?"))
+    assert all("Reviewer notes for this section" not in first(phase) for phase in ("rescore", "sync"))
     assert "Private prose sentinel" not in first("rescore")
     assert "Private prose sentinel" in first("sync") and table in first("sync")
     assert all(v not in first("sync") for v in ("Evidence sentinel", "Library sentinel", "7: Numbered answer"))
@@ -297,6 +299,55 @@ def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, cap
     assert phases == ["rescore", "sync", "sync"] and (case / ".stage2-complete").is_file()
     run(case, "stage2", 300000, monkeypatch, "--library", str(library))
     assert phases == ["rescore", "sync", "sync"]
+
+
+def test_stage2_reviewer_notes_invalidate_both_phases(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    sections = work / "sections"
+    sections.mkdir(parents=True)
+    (work / "plan.md").write_text("## A\n")
+    review = work / "reviews/A.notes.md"
+    review.parent.mkdir()
+    (review.parent / "B.notes.md").write_text("Another section's review")
+    weights = {key: ".09" for key in cli._SCORE_IDS}
+    weights["X11"] = ".10"
+    rows = ["| 指标 | Rij | γij | Xij |", "|---|---|---|---|"]
+    rows.extend(f"| {key} | 40 | {weight} | {40 * float(weight):.2f} |" for key, weight in weights.items())
+    table = "\n".join(rows) + "\n基准 F=40.00，Ⅱ级。"
+    (sections / "A.table.md").write_text(table)
+    (sections / "A.md").write_text("# A\n\n" + table)
+
+    phases = []
+    def model(phase):
+        phases.append(phase)
+        ops = []
+        if phase == "rescore":
+            ops = [call("calculate_score", scores=dict.fromkeys(weights, "40"), weights=weights, include_products=True),
+                   call("edit_file", file_path="/work/sections/A.table.md", old_string="40.00，Ⅱ级", new_string="40.00，Ⅱ级")]
+        usage = dict(input_tokens=15, output_tokens=2, total_tokens=17)
+        return ScriptedModel(responses=[m.model_copy(update={"usage_metadata": usage}) for m in [*ops, AIMessage(content="Checked")]])
+    monkeypatch.setattr(cli, "make_model", model)
+    heading = "Reviewer notes for this section (apply each one; cite the source the note points to; a note never overrides a source or the scoring rules):"
+    # Begin with a valid imported handoff and no completion receipt. The same table bytes are returned each time.
+    for text in ("Check source A.\nCheck source B.", "Check source C.", None):
+        if text is None:
+            review.unlink()
+        else:
+            review.write_text(text)
+        phases.clear()
+        run(tmp_path, "stage2", 650000, monkeypatch)
+        assert phases == ["rescore", "sync"] and (tmp_path / ".stage2-complete").is_file()
+        for phase in phases:
+            path = max((work / "runs").glob("*-" + phase + ".jsonl"))
+            first = json.loads(path.read_text().splitlines()[0])["content"]
+            assert "Another section's review" not in first
+            if text is None:
+                assert heading not in first
+            else:
+                assert first.endswith(heading + "\n" + text) and first.count(heading) == 1
+        phases.clear()
+        run(tmp_path, "stage2", 650000, monkeypatch)
+        assert phases == []
 
 
 def test_table_gate_product_weight_boundary_scenarios_and_scope(tmp_path):
