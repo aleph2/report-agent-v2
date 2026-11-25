@@ -1041,7 +1041,7 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
     def phase_limit(phase, remaining):
         if phase == "gather" and phase not in overrides:
             return int(remaining * GATHER_BUDGET_FRACTION)
-        default = {"rescore": 260000, "sync": 150000}.get(phase, REVISION_CAPS.get(phase, remaining))
+        default = {"rescore": 450000, "sync": 200000}.get(phase, REVISION_CAPS.get(phase, remaining))
         return min(remaining, overrides.get(phase, default))
 
     lessons = learn.library_text(library)

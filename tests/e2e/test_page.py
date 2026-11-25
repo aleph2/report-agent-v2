@@ -98,6 +98,7 @@ def test_local_page(workspace, tmp_path):
 
     page = get(url, "/").decode()
     assert 'lang="zh-CN"' in page and "上传客户答复" in page
+    assert r"rescore=450000\nsync=200000" in page
     (cases / ".private").mkdir()
     assert json.loads(get(url, "/api/cases")) == []
     with pytest.raises(HTTPError, match="404"):
