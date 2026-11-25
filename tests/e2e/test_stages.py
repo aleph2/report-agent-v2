@@ -279,11 +279,11 @@ def test_rescore_and_sync_resume_with_a_checked_table(tmp_path, monkeypatch, cap
             raise AssertionError(phase)
         return ScriptedModel(responses=[m.model_copy(update={"usage_metadata": end.usage_metadata}) for m in ops] + [end])
     monkeypatch.setattr(cli, "make_model", fake)
-    run(case, "stage2", 300000, monkeypatch, "--library", str(library))
+    run(case, "stage2", 650000, monkeypatch, "--library", str(library))
     assert phases == ["rescore", "sync"]
     progress = (work / "runs/progress.txt").read_text()
     last_line = len(body.read_text().splitlines())
-    assert "rescore=260000 sync=150000" in progress
+    assert "rescore=450000 sync=200000" in progress
     assert f"line {last_line}" in progress and "\tunfinished\t" in progress and f"line {last_line}" in capsys.readouterr().out
     assert not (case / ".stage2-complete").exists()
     def first(phase):

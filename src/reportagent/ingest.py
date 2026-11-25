@@ -265,7 +265,7 @@ def _profile_axes(sheet, paths):
     return xfit, yfit, labels
 
 
-def profile_data(case, file, page, layer=None, endpoints=None):
+def profile_data(case, file, page, layer=None, endpoints=None, min_segment_m=1.0):
     root = case.resolve()
     relative = Path(file.lstrip("/"))
     try:
@@ -306,20 +306,40 @@ def profile_data(case, file, page, layer=None, endpoints=None):
     left, right = sorted(endpoints)
     if not all(map(math.isfinite, endpoints)) or left == right:
         return dict(info, unavailable="Choose two distinct finite endpoints in metres.")
-    spans = []
+    spans, measured = [], []
+    unavailable = None
     for segments in paths[layer]:
         for operator, raw in segments:
             points = [(calibrated(x, xfit), calibrated(y, yfit)) for x, y in raw]
             if max(x for x, _ in points) < left or min(x for x, _ in points) > right:
                 continue
             if operator not in ("l", "h"):
-                return dict(info, unavailable="Selected interval contains a curve. Choose a polyline.")
+                unavailable = "Selected interval contains a curve. Choose a polyline."
+                continue
             (a, b), (c, d) = sorted(points)
             if c-a < 1e-8:
+                if a == c and b == d:
+                    continue
                 if abs(b-d) >= .02:
-                    return dict(info, unavailable="A vertical segment makes the elevation ambiguous.")
+                    unavailable = "A vertical segment makes the elevation ambiguous."
+                (start, start_y), (end, end_y) = points
             else:
                 spans.append((a, b, c, d))
+                start, end = max(left, a), min(right, c)
+                if start >= end:
+                    continue
+                slope = (d-b)/(c-a)
+                start_y, end_y = b+(start-a)*slope, b+(end-a)*slope
+                if endpoints[0] > endpoints[1]:
+                    start, start_y, end, end_y = end, end_y, start, start_y
+            length = abs(end-start)
+            measured.append(dict(x_from=start, x_to=end, elevation_from_m=start_y, elevation_to_m=end_y,
+                                 run_m=length, angle_deg=math.degrees(math.atan2(end_y-start_y, length))))
+    measured.sort(key=lambda part: part["x_from"], reverse=endpoints[0] > endpoints[1])
+    eligible = (part for part in measured if part["run_m"] >= min_segment_m)
+    info.update(segments=measured, steepest_segment=max(eligible, key=lambda part: abs(part["angle_deg"]), default=None))
+    if unavailable:
+        return dict(info, unavailable=unavailable)
     knots = sorted({left, right, *(v for a, _, c, _ in spans for v in (a, c) if left < v < right)})
 
     def height(x):

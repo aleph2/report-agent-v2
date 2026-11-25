@@ -184,7 +184,8 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
             return self._end(total)
         previous = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
         last_input = (previous.usage_metadata or {}).get("input_tokens") if previous else None
-        if last_input is not None and self.max_tokens - total < 2 * (last_input + self.output_reserve):
+        turns = 3 if self.phase == "rescore" else 2
+        if last_input is not None and self.max_tokens - total < turns * (last_input + self.output_reserve):
             notice = "This is the last response this phase can make; save your file now. "
             if self.phase in ("revise", "sync"):
                 save = f"In the {self.phase} phase, make all remaining edits now, as separate edit_file calls in this one response."
@@ -202,7 +203,7 @@ class TokenCapMiddleware(AgentMiddleware[TokenCapState]):
                 save = "Save your work now in one write; do not read anything more."
             if self.info:
                 save += f" Remaining allowance: {self.max_tokens - total} tokens."
-            return {"final_save_rule": "remaining < 2 * (previous input + output reserve)", "messages": [HumanMessage(
+            return {"final_save_rule": f"remaining < {turns} * (previous input + output reserve)", "messages": [HumanMessage(
                 content=notice + save
             )]}
         # Keep pending tool calls and their results together before adding the note.

@@ -293,8 +293,9 @@ def test_async_read_retries_a_text_file_with_a_line_window(tmp_path):
     assert "field observation" in window and "field observation" not in full
 
 
-@pytest.mark.parametrize("calculation_output,can_save", [(1000, True), (30000, False)])
-def test_rescore_final_calculation_can_feed_one_budgeted_save(tmp_path, monkeypatch, calculation_output, can_save):
+# At 130k the first read leaves 102k: enough for two 41k requests, below the 123k research threshold.
+@pytest.mark.parametrize("limit,calculation_output,can_save", [(130000, 1000, True), (103000, 1000, True), (103000, 30000, False)])
+def test_rescore_final_calculation_can_feed_one_budgeted_save(tmp_path, monkeypatch, limit, calculation_output, can_save):
     section = tmp_path / "work/sections/A.table.md"
     section.parent.mkdir(parents=True)
     (tmp_path / "index.md").write_text("Evidence")
@@ -316,7 +317,7 @@ def test_rescore_final_calculation_can_feed_one_budgeted_save(tmp_path, monkeypa
     monkeypatch.setattr(ScriptedModel, "_generate", capture)
     log = tmp_path / "requests.jsonl"
     model = ScriptedModel(responses=replies)
-    cap = TokenCapMiddleware(103000, phase="rescore", guard=True, request_log=log)
+    cap = TokenCapMiddleware(limit, phase="rescore", guard=True, request_log=log)
     state = build_agent(tmp_path, model, phase="rescore", section="A", middleware=[cap]).invoke(
         {"messages": [("user", "Rescore section A.")]})
     assert offered[1] == {"calculate_score", "write_file", "edit_file"}

@@ -14,7 +14,7 @@ from tests.fake_model import ScriptedModel, call
 def drawing_case(tmp_path):
     sources = tmp_path / "sources"
     sources.mkdir()
-    for name in ("profile.pdf", "profile-without-ticks.pdf"):
+    for name in ("profile.pdf", "profile-without-ticks.pdf", "profile-segments.pdf"):
         copyfile(Path(__file__).parents[1] / "fixtures" / name, sources / name)
     return tmp_path
 
@@ -103,21 +103,55 @@ def test_unscaled_layers_stay_visible(drawing_case):
     assert data["layers"]["dmx"] == {"path_count": 1, "x_extent_m": None, "y_extent_m": None}
 
 
-def test_rescore_compares_the_measurement_with_the_drawings():
+def test_profile_segments_clip_to_the_range_and_filter_by_horizontal_run(drawing_case):
+    location = dict(file="/sources/profile-segments.pdf", page=1, x_from=2, x_to=17)
+    result = json.loads(tool_result(drawing_case, "gather", "measure_profile", **location).content)
+    segments = result["segments"]
+    assert len(segments) == 3
+    assert [s["run_m"] for s in segments] == pytest.approx([8, 0.4, 6.6])
+    steepest = result["steepest_segment"]
+    assert steepest == segments[0]
+    assert [steepest[k] for k in ("x_from", "x_to", "elevation_from_m", "elevation_to_m")] == pytest.approx([2, 10, 37, 25])
+    assert steepest["angle_deg"] == pytest.approx(math.degrees(math.atan(-1.5)))
+    reverse = dict(location, x_from=17, x_to=2)
+    fine = json.loads(tool_result(drawing_case, "rescore", "measure_profile", **reverse, min_segment_m=0.2).content)
+    assert fine["steepest_segment"]["x_from"] == pytest.approx(10.4)
+    assert fine["steepest_segment"]["angle_deg"] == pytest.approx(math.degrees(math.atan(10)))
+    coarse = json.loads(tool_result(drawing_case, "rescore", "measure_profile", **location, min_segment_m=9).content)
+    assert coarse["steepest_segment"] is None and coarse["segments"] == segments
+
+
+def test_design_angle_includes_the_bench(drawing_case):
+    result = json.loads(tool_result(drawing_case, "rescore", "measure_profile", file="/sources/profile-segments.pdf",
+                                    page=1, layer="sjx", x_from=0, x_to=21).content)
+    assert (result["H0_m"], result["L0_m"], result["alpha0_deg"]) == pytest.approx((12, 21, math.degrees(math.atan2(12, 21))))
+    assert result["segments"][1]["angle_deg"] == 0
+
+
+def test_verticals_are_listed_even_when_the_two_point_measurement_is_unavailable(drawing_case):
+    result = json.loads(tool_result(drawing_case, "rescore", "measure_profile", file="/sources/profile-segments.pdf",
+                                    page=1, layer="sjx", x_from=29, x_to=37).content)
+    assert "vertical" in result["unavailable"] and "H0_m" not in result
+    assert [s["run_m"] for s in result["segments"]] == pytest.approx([0, 6, 0])
+    assert result["steepest_segment"] == result["segments"][1]
+
+
+def test_rescore_follows_case_guides_for_x12():
     from importlib.resources import files
 
-    lines = files("reportagent.skills").joinpath("rescore-section", "SKILL.md").read_text(encoding="utf-8").splitlines()
-    x12 = next(i for i, line in enumerate(lines) if line.startswith("For X12, measure the natural ground angle"))
-    assert lines[x12 - 1] == (
-        "Before measuring, read the text of the slope's own cross-section page (page-NNN.txt) for a stated natural slope angle."
-    )
-    assert lines[x12 + 1] == (
-        "Measure the original ground between the offsets where the design cut face meets it at the toe and at the "
-        "top of the cut on a representative or controlling cross-section, cite those offsets, and note in the row "
-        "if the page's notes name a different chainage."
-    )
-    assert lines[x12 + 2] == (
-        "If the drawings or design notes state this slope's natural slope angle as a range, use its lower bound as α₀ "
-        "so that the risk is not underestimated, cite it, and report the measure_profile result beside it as a check; "
-        "if they state only a maximum or no angle, use the measured α₀ and cite the stated maximum beside it."
-    )
+    skill = files("reportagent.skills").joinpath("rescore-section", "SKILL.md").read_text()
+    assert (
+        "For X12, measure angles on the slope's own drawing as the case guides, adopted lessons and answers direct, "
+        "using measure_profile for every measured value, choosing the layer, range and points yourself, and citing "
+        "the guide, page, layer, offsets and result in the row.\n"
+        "If a drawing is unclear or a lesson's method cannot be applied, write 待核实 in the row and do not infer the value."
+    ) in skill
+    for old in ("Before measuring,", "For X12, measure the natural ground angle", "If the drawings or design notes state",
+                "Measure the original ground between the offsets"):
+        assert old not in skill
+    assert "/index.md" in skill
+    gather = files("reportagent.skills").joinpath("gather-evidence", "SKILL.md").read_text()
+    assert ("For an angle on a drawing, follow the case guides: use list_profile_layers and measure_profile on the "
+            "original cross-section PDF, choose the layer, range and points yourself, and record the guide, source, "
+            "page, layer, points and result (or the missing evidence).") in gather
+    assert "choose the toe and crest on the ground line" not in gather
