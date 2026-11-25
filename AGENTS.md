@@ -33,7 +33,7 @@ An agent system that writes an assessment report from supplied source documents 
 
 | Measure | Budget |
 |---|---|
-| Our own code in `src/reportagent/`, excluding `export/` | 3,140 lines |
+| Our own code in `src/reportagent/`, excluding `export/` | 3,237 lines |
 | Ported code in `src/reportagent/export/` | 1,700 lines |
 | Modules | 7 plus `export/` |
 | Our own tools | 7 |
@@ -72,3 +72,5 @@ Going over a budget needs the owner's decision, recorded below.
 - Task 134 (2026-11-25): Record the client's confirmation as an indexed source in the private case materials. Under the owner's delegation, Claude raised the core limit from 3,100 to 3,125 lines for the rescore save and retry.
 
 - Task 136 (2026-11-25): Under the owner's delegation, Claude raised the core limit from 3,125 to 3,140 lines. Rescore may save its assigned table after the calculator has returned a usable result in that phase.
+
+- Task 137 (2026-11-25): Under the owner's delegation, Claude raised the core limit from 3,140 to 3,237 lines. Code checks each indicator weight and places the verified scoring table in the section. The weights in `phase-settings.toml` follow the current client's Q10 order. After the first full report, move weight overrides into case settings and retain this file as the default.
