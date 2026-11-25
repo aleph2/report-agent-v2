@@ -108,7 +108,15 @@ def test_rescore_compares_the_measurement_with_the_drawings():
 
     lines = files("reportagent.skills").joinpath("rescore-section", "SKILL.md").read_text(encoding="utf-8").splitlines()
     x12 = next(i for i, line in enumerate(lines) if line.startswith("For X12, measure the natural ground angle"))
+    assert lines[x12 - 1] == (
+        "Before measuring, read the text of the slope's own cross-section page (page-NNN.txt) for a stated natural slope angle."
+    )
     assert lines[x12 + 1] == (
+        "Measure the original ground between the offsets where the design cut face meets it at the toe and at the "
+        "top of the cut on a representative or controlling cross-section, cite those offsets, and note in the row "
+        "if the page's notes name a different chainage."
+    )
+    assert lines[x12 + 2] == (
         "If the drawings or design notes state this slope's natural slope angle as a range, use its lower bound as α₀ "
         "so that the risk is not underestimated, cite it, and report the measure_profile result beside it as a check; "
         "if they state only a maximum or no angle, use the measured α₀ and cite the stated maximum beside it."

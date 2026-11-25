@@ -64,3 +64,5 @@ Going over a budget needs the owner's decision, recorded below.
 - Task 129 (2026-11-24): The owner approved a fixed rescore → sync sequence for scored sections. Code checks row products, the weight sum, F, the configured grade and written score/grade statements. A mismatch records the lines and leaves the phase unfinished. The agent chooses the evidence, conditions and scores.
 
 - Task 130 (2026-11-24): Under the owner's delegation, Claude raised the core budget to 3,050 lines and the tool budget to seven for the two drawing-measurement tools. The agent chooses a layer and endpoints. Code calibrates the axes and measures the selected interval.
+
+- Task 132 (2026-11-24): Under the owner's delegation, Claude increased the remaining stage 2 allowance by 900,000 tokens, from 1,238,885 to 2,138,885. The default rescore cap is 260,000 and sync is 150,000. At 410,000 each, five sections can use at most 2,050,000. The next paid invocation is limited to 04-4 after approval, merge and tag.

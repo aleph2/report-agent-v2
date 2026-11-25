@@ -291,3 +291,43 @@ def test_async_read_retries_a_text_file_with_a_line_window(tmp_path):
     full, window = [m.content for m in state["messages"] if m.type == "tool"]
     assert "estimated" in full and "offset" in full and "limit" in full
     assert "field observation" in window and "field observation" not in full
+
+
+@pytest.mark.parametrize("calculation_output,can_save", [(1000, True), (30000, False)])
+def test_rescore_final_calculation_can_feed_one_budgeted_save(tmp_path, monkeypatch, calculation_output, can_save):
+    section = tmp_path / "work/sections/A.table.md"
+    section.parent.mkdir(parents=True)
+    (tmp_path / "index.md").write_text("Evidence")
+    read = call("read_file", file_path="/index.md")
+    calculate = call("calculate_score", scores={"X12": 50}, weights={"X12": 1}, include_products=True)
+    write = call("write_file", file_path="/work/sections/A.table.md", content="F=50.00")
+    replies = []
+    for item, inputs, outputs in [(read, 25000, 3000), (calculate, 26000, calculation_output), (write, 26000, 15)]:
+        replies.append(item.model_copy(update={"usage_metadata": dict(input_tokens=inputs, output_tokens=outputs,
+                                                                      total_tokens=inputs+outputs)}))
+    offered, seen = [], []
+    generate = ScriptedModel._generate
+
+    def capture(self, messages, **kwargs):
+        offered.append({t.name for t in kwargs["tools"]})
+        seen.append(messages)
+        return generate(self, messages, **kwargs)
+
+    monkeypatch.setattr(ScriptedModel, "_generate", capture)
+    log = tmp_path / "requests.jsonl"
+    model = ScriptedModel(responses=replies)
+    cap = TokenCapMiddleware(103000, phase="rescore", guard=True, request_log=log)
+    state = build_agent(tmp_path, model, phase="rescore", section="A", middleware=[cap]).invoke(
+        {"messages": [("user", "Rescore section A.")]})
+    assert offered[1] == {"calculate_score", "write_file", "edit_file"}
+    result, = [m for m in state["messages"] if m.type == "tool" and m.name == "calculate_score"]
+    assert json.loads(result.text)["base"]["F"] == "50.00"
+    decisions = [row["decision"] for line in log.read_text().splitlines() if "decision" in (row := json.loads(line))]
+    if can_save:
+        assert offered[2:] == [{"write_file", "edit_file"}]
+        assert result in seen[2]
+        assert decisions == ["send", "send", "send"] and section.read_text() == "F=50.00"
+    else:
+        assert len(offered) == 2 and decisions == ["send", "send", "stop"]
+        assert not section.exists()
+    assert state["total_tokens"] == 54000 + calculation_output + (26015 if can_save else 0)
