@@ -259,7 +259,15 @@ def test_sync_only_targets_plain_and_scored_sections(tmp_path, monkeypatch):
     cached.mkdir(parents=True)
     copyfile(Path(__file__).parents[1] / "fixtures/one-page.pdf", cached.with_suffix(".pdf"))
     (cached / "page-001.txt").write_text("unique evidence")
-    (tmp_path / "commission/template/report-layout.toml").write_text('[sections.Plain]\nexcerpts = {"design.pdf" = [1]}\n[sections.Scored]\n')
+    from PIL import Image
+    import base64
+    guide = tmp_path / "sources/reference"
+    guide.mkdir()
+    copyfile(cached.with_suffix(".pdf"), guide.with_suffix(".pdf"))
+    (guide / "page-001.txt").write_text("independent guide evidence")
+    Image.new("RGB", (40, 60), "white").save(guide / "page-001.png")
+    config = tmp_path / "commission/template/report-layout.toml"
+    config.write_text('[sync_guide_pages]\n"reference.pdf" = [1]\n[sections.Plain]\nexcerpts = {"design.pdf" = [1]}\n[sections.Scored]\n')
     library = tmp_path / "lessons"
     library.mkdir()
     (library / "lessons.md").write_text("adopted lesson sentinel")
@@ -280,8 +288,18 @@ def test_sync_only_targets_plain_and_scored_sections(tmp_path, monkeypatch):
     assert not (tmp_path / ".stage2-complete").exists()
     from json import loads
     prompts = [loads(p.read_text().splitlines()[0])["content"] for p in sorted((work/"runs").glob("*-sync.jsonl"))]
-    assert "unique evidence" in prompts[0] and "unique evidence" not in prompts[1]
-    assert all("adopted lesson sentinel" in p for p in prompts)
+    assert all(isinstance(content, list) for content in prompts)
+    for i, content in enumerate(prompts):
+        text = "\n".join(b["text"] for b in content if b["type"] == "text")
+        assert ("unique evidence" in text) == (i == 0)
+        assert "adopted lesson sentinel" in text and "independent guide evidence" in text
+        assert "reference" in text and "page-001" in text
+        image, = [b for b in content if b["type"] == "image"]
+        assert base64.b64decode(image["base64"]) == (guide / "page-001.png").read_bytes()
+    (guide / "page-001.png").unlink()
+    import pytest
+    with pytest.raises(ValueError, match="page-001.png"):
+        cli._stage_messages(tmp_path, "Plain", "sync", None, "", "")
 
 def test_internal_channel_dry_run_and_export(tmp_path):
     import json

@@ -66,6 +66,11 @@ def _source_document(sources, filename):
         return path
 
 
+def _page_image(page, label):
+    return [{"type": "text", "text": label},
+            {"type": "image", "mime_type": "image/png", "base64": base64.b64encode(page.read_bytes()).decode("ascii")}]
+
+
 def _verification_input(case, name, top):
     root = case.resolve()
     sources = root / "sources"
@@ -117,10 +122,7 @@ def _verification_input(case, name, top):
         if attached == 10:
             break
         before = len(blocks)
-        needs_image = True
         for ext in ("txt", "png"):
-            if ext == "png" and not needs_image:
-                continue
             page = pdf.with_suffix("") / f"page-{start:03d}.{ext}"
             if not page.resolve().is_relative_to(sources) or not page.is_file():
                 continue
@@ -128,19 +130,16 @@ def _verification_input(case, name, top):
             try:
                 size = page.stat().st_size
                 if size > available_bytes:
-                    if ext == "txt":
-                        needs_image = False
-                    continue
+                    break
                 if ext == "txt":
                     page_text = page.read_text(encoding="utf-8")
-                    needs_image = len(page_text.strip()) < 300
                     blocks.append({"type": "text", "text": label + "\n" + page_text})
                 else:
-                    image = base64.b64encode(page.read_bytes()).decode("ascii")
-                    blocks.extend([{"type": "text", "text": label},
-                                   {"type": "image", "mime_type": "image/png", "base64": image}])
+                    blocks.extend(_page_image(page, label))
                 supplied.append(page.relative_to(root).as_posix())
                 available_bytes -= size
+                if ext == "txt" and len(page_text.strip()) >= 300:
+                    break
             except (OSError, UnicodeError) as error:
                 blocks.append({"type": "text", "text": f"{label} unavailable ({type(error).__name__})"})
         attached += len(blocks) > before
@@ -1010,34 +1009,6 @@ def _section_phases(name):
     )
 
 
-def _phase_messages(case, name, phase, prompt):
-    if phase in ("rescore", "sync"):
-        body = f"work/sections/{name}.md"
-        table = body[:-3] + ".table.md"
-        notes = f"work/notes/{name}.md"
-        paths = [notes] if phase == "rescore" else [body, table]
-        blocks = ([f"Rescore {name}. Save /{table}.", "Current scoring and applicability excerpt:\n" +
-                   _score_excerpt((case / body).read_text(encoding="utf-8-sig").splitlines())]
-                  if phase == "rescore" else [f"Synchronize the following section /{body} to the checked table /{table}."])
-        if phase == "sync" and not (case / table).exists():
-            paths = [body]
-            blocks = [f"Synchronize /{body} using the supplied sources and adopted lessons."]
-        if phase == "sync":
-            paths += layout_pages(case, name)
-        for path in paths:
-            value = (case / path).read_text(encoding="utf-8-sig") if (case / path).is_file() else "(unavailable)"
-            blocks.append(f"/{path}\n{value}")
-        return [HumanMessage(content="\n\n".join(blocks), response_metadata={"supplied_files": [p for p in paths if (case / p).is_file()]})]
-    messages = (_revision_messages(case, name, phase, prompt) if phase in REVISION_CAPS
-                else [HumanMessage(content=prompt)])
-    first = messages[0]
-    if supplied := first.response_metadata.get("supplied_files"):
-        notice = supplied_notice(supplied)
-        first.content = ([{"type": "text", "text": notice}, *first.content] if isinstance(first.content, list)
-                         else notice + "\n\n" + first.content)
-    return messages
-
-
 def _rescore_answers(case, cfg):
     blocks = []
     for row in answered_client_rows(case / "out" / cfg["xlsx_file"], cfg):
@@ -1046,15 +1017,44 @@ def _rescore_answers(case, cfg):
     return "Answered client workbook rows:\n" + "\n\n".join(blocks) if blocks else ""
 
 
-def _stage_messages(case, name, phase, prompt, lessons, extra):
-    messages = _phase_messages(case, name, phase, prompt)
+def _stage_messages(case, name, phase, prompt, lessons="", extra=""):
+    if phase in ("sync", "rescore"):
+        body = f"work/sections/{name}.md"
+        table = body[:-3] + ".table.md"
+        if phase == "rescore":
+            paths = [f"work/notes/{name}.md"]
+            excerpt = _score_excerpt((case / body).read_text(encoding="utf-8-sig").splitlines())
+            prompt = f"Rescore {name}. Save /{table}.\n\nCurrent scoring and applicability excerpt:\n{excerpt}"
+        else:
+            paths = [body, table] if (case / table).is_file() else [body]
+            prompt = (f"Synchronize the following section /{body} to the checked table /{table}." if table in paths else
+                      f"Synchronize /{body} using the supplied sources and adopted lessons.")
+            paths.extend(layout_pages(case, name))
+        parts, images = [prompt], []
+        for path in paths:
+            file = case / path
+            if file.suffix == ".png":
+                images.extend(_page_image(file, "/" + path))
+            else:
+                value = file.read_text(encoding="utf-8-sig") if file.is_file() else "(unavailable)"
+                parts.append(f"/{path}\n{value}")
+        messages = [HumanMessage(content="\n\n".join(parts), response_metadata={"supplied_files": [p for p in paths if (case / p).is_file()]})]
+    else:
+        messages = _revision_messages(case, name, phase, prompt) if phase in REVISION_CAPS else [HumanMessage(content=prompt)]
+    first = messages[0]
+    if phase not in ("sync", "rescore") and (supplied := first.response_metadata.get("supplied_files")):
+        notice = supplied_notice(supplied)
+        first.content = ([{"type": "text", "text": notice}, *first.content] if isinstance(first.content, list)
+                         else notice + "\n\n" + first.content)
     if lessons and (phase in ("plan", "gather", "write", "clarify", "revise", "rescore") or
                     (phase == "sync" and (case / "commission/template/report-layout.toml").is_file())):
-        messages[0].content += "\n\nOwner-adopted lessons for reference:\n" + lessons
+        first.content += "\n\nOwner-adopted lessons for reference:\n" + lessons
         if phase == "clarify":
-            messages[0].content += "\nAsk the client to confirm applicable DEFAULT lessons for this case."
+            first.content += "\nAsk the client to confirm applicable DEFAULT lessons for this case."
     if extra:
-        messages[0].content += "\n\n" + extra
+        first.content += "\n\n" + extra
+    if phase == "sync" and images:
+        first.content = [{"type": "text", "text": first.content}, *images]
     return messages
 
 
@@ -1879,7 +1879,7 @@ def _execute(args, parser, receipt):
         limit = int(args.max_tokens * GATHER_BUDGET_FRACTION) if gathering else remaining
         if phase in REVISION_CAPS:
             limit = min(limit, phase_caps[phase])
-        messages = _phase_messages(args.case, getattr(args, "section", None), phase, prompt)
+        messages = _stage_messages(args.case, getattr(args, "section", None), phase, prompt)
         if preflight:
             _preflight(args.case, args.section, phase, messages, limit)
             continue

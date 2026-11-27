@@ -262,18 +262,21 @@ def report_layout(case):
 
 def layout_pages(case, section):
     sources = (case / "sources").resolve()
-    pages = report_layout(case).get("sections", {}).get(section, {}).get("excerpts", {})
+    layout = report_layout(case)
+    excerpts = layout.get("sections", {}).get(section, {}).get("excerpts", {})
     paths = []
-    for filename, numbers in pages.items():
-        pdf = (sources / filename).resolve()
-        if not pdf.is_relative_to(sources) or not pdf.is_file() or pdf.suffix.lower() != ".pdf":
-            raise ValueError(f"Invalid design source for {section}: {filename}")
-        for page in numbers:
-            cache = pdf.with_suffix("") / f"page-{page:03d}.txt"
-            if page < 1 or not cache.is_file() or not cache.resolve().is_relative_to(sources):
-                raise ValueError(f"Missing cached design page: {filename} p.{page}")
-            paths.append("sources/" + cache.relative_to(sources).as_posix())
-    return paths
+    for pages, formats in ((excerpts, ("txt",)), (layout.get("sync_guide_pages", {}), ("txt", "png"))):
+        for filename, numbers in pages.items():
+            pdf = (sources / filename).resolve()
+            if not pdf.is_relative_to(sources) or not pdf.is_file() or pdf.suffix.lower() != ".pdf":
+                raise ValueError(f"Invalid sync source for {section}: {filename}")
+            for page in numbers:
+                for ext in formats:
+                    cache = pdf.with_suffix("") / f"page-{page:03d}.{ext}"
+                    if page < 1 or not cache.is_file() or not cache.resolve().is_relative_to(sources):
+                        raise ValueError(f"Missing cached sync page: {filename}, {cache.name}")
+                    paths.append("sources/" + cache.relative_to(sources).as_posix())
+    return list(dict.fromkeys(paths))
 
 
 def _note(document, runs, text, cfg):
