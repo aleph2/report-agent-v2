@@ -15,7 +15,7 @@ import sys
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from .export.docx import _settings, _sheet_rows, clarification_numbers
+from .export.docx import _settings, _sheet_rows, clarification_numbers, feedback_text
 
 
 def recorded_turns(transcript):
@@ -353,17 +353,20 @@ def library_text(directory):
     return path.read_text(encoding="utf-8-sig") if path and path.is_file() else ""
 
 
-def proposal_prompt(case, library):
+def proposal_prompt(case, library, feedback=()):
     cfg = _settings(case)
     output = case.resolve() / "out"
     book = (output / cfg["xlsx_file"]).resolve()
     if book.parent != output:
         sys.exit("The answered workbook must be inside the case output directory.")
-    rows = _sheet_rows(book, cfg)
+    rows = _sheet_rows(book, cfg) if book.exists() or not feedback else []
     skills = sorted(p.name for p in files("reportagent.skills").iterdir() if p.joinpath("SKILL.md").is_file())
     parts = ["Propose lessons for owner review and save /work/learn/proposals.md.",
-             "Available skills: " + ", ".join(skills), "Current lesson library:\n" + library_text(library),
-             "Client workbook: " + cfg["xlsx_file"]]
+             "Available skills: " + ", ".join(skills), "Current lesson library:\n" + library_text(library)]
+    if rows:
+        parts.append("Client workbook: " + cfg["xlsx_file"])
+    for path in feedback:
+        parts.append(f"Client feedback ({path.name}):\n{feedback_text(path)}")
     for row in rows:
         if any(row.values()):
             parts.append(f"Q{row.get('number') or '?'}\nQuestion: {row.get('question', row.get('content', ''))}\n"
@@ -413,6 +416,7 @@ def add_parser(commands):
             item.add_argument("--library", type=Path, required=action == "adopt")
         if action == "propose":
             item.add_argument("--max-tokens", type=int, required=True)
+            item.add_argument("--feedback", type=Path, action="append", default=[], help="customer feedback DOCX or UTF-8 text, repeatable for screenshot descriptions")
             item.add_argument("--preflight", action="store_true", help="estimate three requests offline")
         if action == "feedback":
             item.add_argument("--input", type=Path, required=True, help="owner feedback JSON")
