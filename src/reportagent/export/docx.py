@@ -169,7 +169,7 @@ def _table(document, rows, alignment, cfg):
             paragraph.style = cfg["table_style"] if cfg["table_style"] in document.styles else cfg["body_style"]
             if j < len(alignment):
                 paragraph.alignment = alignment[j]
-            _inline(document, paragraph, value, cfg, preceding or tuple(paragraph.runs))
+            _body_inline(document, paragraph, value, cfg, preceding or tuple(paragraph.runs))
             for run in paragraph.runs:
                 run.font.size = Pt(float(cfg["table_size"]))
             preceding.extend(r for r in paragraph.runs if r.text)
@@ -281,8 +281,98 @@ def _note(document, runs, text, cfg):
                          author=cfg["comment_author"])
 
 
+_REPORT_NOTE = r"\[\[note:.*?\]\](?!\])"
+_KNOWN_MARKERS = re.compile(_REPORT_NOTE + r"|\[\[drawing\]\]|\[\[说明 X\d{2}:[^\]\n]*\]\]")
+_QUOTED = re.compile(r'“[^”]*”|「[^」]*」|"[^"]*"')
+
+
+def _channels(text):
+    """Line-delimited blocks in section prose; malformed groups stay visible for review."""
+    lines = text.splitlines(keepends=True)
+    spans, findings = [], []
+    start = fence = None
+    depth = 0
+    unknown = []
+    invalid = False
+    for number, raw in enumerate(lines):
+        line = raw.rstrip("\r\n")
+        delimiter = re.match(r"^ {0,3}(\x60{3,}|~{3,})", line)
+        if delimiter:
+            token = delimiter[1]
+            if fence is None:
+                fence = token
+            elif token.startswith(fence) and not line[delimiter.end():].strip():
+                fence = None
+            continue
+        if fence:
+            continue
+        if line == "[[internal]]":
+            if depth == 0:
+                start, invalid = number, bool(unknown)
+            else:
+                invalid = True
+                findings.append((number, line))
+            depth += 1
+        elif line == "[[/internal]]" and depth:
+            depth -= 1
+            if depth == 0 and not invalid:
+                spans.append((start, number))
+        else:
+            literal = _KNOWN_MARKERS.sub("", line)
+            if "[[" in literal or re.search(r"^\s*\[/?internal\b", literal, re.I):
+                invalid = True
+                findings.append((number, line))
+                other = re.fullmatch(r"\[\[(/?)([\w-]+)(?:[\s:][^\]]*)?\]\]", literal.strip())
+                if other and other[2] != "internal":
+                    if not other[1]:
+                        unknown.append(other[2])
+                    elif unknown and unknown[-1] == other[2]:
+                        unknown.pop()
+                elif ("[[" in literal and "]]" not in literal) or re.match(r"^\s*\[+(?!/)", literal):
+                    # A malformed opener can enclose later marker-looking lines.
+                    unknown.append(None)
+    if depth:
+        findings.append((start, lines[start].rstrip("\r\n")))
+    visible = lines.copy()
+    for first, last in spans:
+        visible[first:last + 1] = [re.sub(r"[^\r\n]+", "", line) for line in lines[first:last + 1]]
+    return "".join(visible), spans, sorted(findings)
+
+
+def _phrase_audit(case):
+    layout = report_layout(case)
+    for _, name in _plan(case)[1]:
+        path = case / "work/sections" / (name + ".md")
+        if not path.is_file() or name in layout.get("freeze", []):
+            continue
+        raw = path.read_text(encoding="utf-8-sig")
+        lines = raw.splitlines(keepends=True)
+        visible, spans, findings = _channels(raw)
+        after = visible.splitlines(keepends=True)
+        hidden = set()
+        for first, last in spans:
+            hidden.update(range(first, last + 1))
+            before = "".join(lines[first:last + 1])
+            yield dict(section=name, line=first + 1, end_line=last + 1, sentence=before.rstrip(),
+                       rule="internal block", action="omit", before=before, after="".join(after[first:last + 1]))
+        for n, line in findings:
+            yield dict(section=name, line=n + 1, sentence=line, rule="boundary", action="review")
+        for n, line in enumerate(lines):
+            protected = [m.span() for m in re.finditer(_REPORT_NOTE + "|" + _QUOTED.pattern, line)]
+            for rule in layout.get("process_patterns", []):
+                for match in re.finditer(rule, line):
+                    quoted = line.lstrip().startswith(">") or any(a <= match.start() and match.end() <= b for a, b in protected)
+                    action = "omit" if n in hidden else "keep" if quoted else "review"
+                    left = re.search(r"[^。！？!?\n]*$", line[:match.start()])[0]
+                    right = re.match(r"[^。！？!?\n]*[。！？!?]?", line[match.end():])[0]
+                    yield dict(section=name, line=n + 1, sentence=(left + match[0] + right).strip(),
+                               rule=rule, matched=match[0], action=action)
+
+
 def _body_inline(document, paragraph, text, cfg, previous):
-    for part in re.split(r"(\[\[note:.*?\]\](?!\]))", text):
+    if "[[note:" not in text:
+        return _inline(document, paragraph, text, cfg, previous)
+    for part in re.split("(" + _REPORT_NOTE + ")", text):
         if part.startswith("[[note:") and part.endswith("]]"):
             _note(document, previous or [paragraph.add_run("\u200b")], part[7:-2].strip(), cfg)
         elif part:
@@ -425,15 +515,13 @@ def _layout_drawing(document, case, drawing, citations, cfg, flags, anchor):
     flags.append(message)
 
 
-def _section(document, path, name, root_level, cfg, layout=None, flags=None):
+def _section(document, path, text, name, root_level, cfg, layout, flags):
     from ..cli import _citations, _scoring_table
-    text = path.read_text(encoding="utf-8-sig")
     case = path.parents[2]
     profile = (layout or {}).get("sections", {}).get(name)
     short, citations, handoff = {}, set(), ""
     measurement_cells = {}
     drawing_done = quoted = False
-    flags = flags if flags is not None else []
     if profile is not None:
         short = dict(re.findall(r"(?m)^\[\[说明 (X\d{2}):([^\]\n]*)\]\]$", text))
         text = re.sub(r"(?m)^\[\[说明 X\d{2}:[^\]\n]*\]\]$", "", text)
@@ -468,7 +556,7 @@ def _section(document, path, name, root_level, cfg, layout=None, flags=None):
         if kind == "heading":
             level, title = value
             paragraph = document.add_heading("", level + root_level - 1)
-            previous = _inline(document, paragraph, _title(title, cfg), cfg, previous)
+            previous = _body_inline(document, paragraph, _title(title, cfg), cfg, previous)
             heading = heading or paragraph
         else:
             if profile is not None:
@@ -503,8 +591,7 @@ def _section(document, path, name, root_level, cfg, layout=None, flags=None):
             if item and item.groupdict().get("number"):
                 value = cfg["list_format"].format(number=item["number"]) + value[item.end():]
             paragraph = document.add_paragraph(style=style)
-            render = _body_inline if profile is not None else _inline
-            previous = render(document, paragraph, value, cfg, previous)
+            previous = _body_inline(document, paragraph, value, cfg, previous)
             if caption:
                 paragraph.paragraph_format.keep_with_next = True
                 threshold = int(cfg["table_new_page_rows"])
@@ -1142,7 +1229,9 @@ def export_docx(case_dir):
         if fixed_paragraphs:
             heading, paragraphs = fixed_paragraphs[0], fixed_paragraphs
         elif path.exists():
-            heading, paragraphs = _section(document, path, name, level, cfg, layout, flags)
+            text, _, issues = _channels(path.read_text(encoding="utf-8-sig"))
+            flags.extend(f"{name}:{n + 1} | boundary requires review: {line}" for n, line in issues)
+            heading, paragraphs = _section(document, path, text, name, level, cfg, layout, flags)
         else:
             heading = document.add_heading(_title(name, cfg), level)
             paragraphs = [heading]
@@ -1151,7 +1240,7 @@ def export_docx(case_dir):
         scores[name] = [entry for para in paragraphs for entry in _export_scores(para.text)]
         if path.is_file() and not fixed_paragraphs:
             flags.extend(_export_flags(pattern, ((f"Section {name}:{n}", line) for n, line in
-                                                  enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1))))
+                                                  enumerate(text.splitlines(), 1))))
         items = case / "work/clarifications" / (name + ".md")
         if not items.exists():
             continue
@@ -1232,3 +1321,14 @@ def export_docx(case_dir):
     if flags:
         print(f"{status} | {output / 'client-readiness.txt'}")
     return target
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Preview report channels and phrase findings without writing files.")
+    parser.add_argument("--dry-run", action="store_true", required=True)
+    parser.add_argument("case", type=Path)
+    for row in _phrase_audit(parser.parse_args().case):
+        print(json.dumps(row, ensure_ascii=False))
