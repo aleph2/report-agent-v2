@@ -21,12 +21,30 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import nsmap, qn
-from docx.shared import Pt
+from docx.shared import Pt, Twips
 from docx.opc.part import Part
+from docx.opc.oxml import serialize_part_xml
 from docx.text.paragraph import Paragraph
 
 
+def _display(text, cfg):
+    """Render source identifiers and explicit Markdown variables without changing arithmetic."""
+    if "_source_titles" not in cfg:
+        return text
+    for name, title in cfg["_source_titles"].items():
+        text = re.sub(r"(?<![A-Za-z0-9_/-])(?:(?:sources|commission)/)?" + re.escape(name) +
+                      r"(?![A-Za-z0-9_.-])", lambda m: title, text)
+    text = re.sub(r"(?<=[A-Za-z0-9)])\*\*(?=\d)", "^", text)
+    # A marked variable can be adjacent to an index (*R*22) or coefficient (2*n*).
+    variables = set(re.findall(r"(?<![A-Za-z0-9_*])\*([A-Za-zα-ωΑ-Ω])\*(?!\*)", text))
+    for variable in variables:
+        text = re.sub(r"(?<![A-Za-z0-9_*])\*" + variable + r"\*(?!\*)", variable, text)
+        text = re.sub(r"(?<=\d)\*" + variable + r"\*(?=[−+])", variable, text)
+    return text
+
+
 def _inline(document, paragraph, text, cfg, fallback=()):
+    text = _display(text, cfg)
     current, previous, bold, italic, offset = [], list(fallback), False, False, 0
     emphasis = {position for match in re.finditer(r"(?<![A-Za-z0-9_*])\*(?![\s*]).+?(?<![\s*])\*(?![A-Za-z0-9_*])|(?<![A-Za-z0-9_])_(?![\s_]).+?(?<![\s_])_(?![A-Za-z0-9_])", text) for position in (match.start(), match.end() - 1)}
     for token in re.split(r"(\*\*|\*|_|" + cfg["citation_pattern"] + r")", text, flags=re.I):
@@ -259,7 +277,8 @@ def layout_pages(case, section):
 
 
 def _note(document, runs, text, cfg):
-    document.add_comment(runs, text, author=cfg["comment_author"])
+    document.add_comment(runs, _display(text, cfg).replace("**", "") if "_source_titles" in cfg else text,
+                         author=cfg["comment_author"])
 
 
 def _body_inline(document, paragraph, text, cfg, previous):
@@ -271,7 +290,7 @@ def _body_inline(document, paragraph, text, cfg, previous):
     return previous
 
 
-def _layout_table(document, handoff, short, bands, title, cfg, flags):
+def _layout_table(document, handoff, short, bands, title, cfg, flags, measurement_cells):
     from ..cli import _scoring_table
     lines = handoff.splitlines()
     frame = _scoring_table(lines)
@@ -286,12 +305,24 @@ def _layout_table(document, handoff, short, bands, title, cfg, flags):
     if not rows or not baseline or any(not code or not bands.get(code[0]) for code in identifiers):
         return False
     document.add_paragraph(title, style=cfg["caption_style"]).paragraph_format.keep_with_next = True
-    table = document.add_table(rows=2, cols=7)
+    table = document.add_table(rows=0, cols=7)
     table.style = "Table Grid"
     available = document.sections[-1].page_width - document.sections[-1].left_margin - document.sections[-1].right_margin
     table.autofit = False
-    for col, fraction in zip(table.columns, (.12, .34, .10, .07, .08, .09, .20)):
-        col.width = int(available * fraction)
+    # Word paints its border outside the grid and snaps it to the printer grid.
+    available = round(available / 635) - 20  # one point shared between both outer edges
+    widths = [round(available * percent / 100) for percent in (13, 30, 12, 8, 8, 9)]
+    widths.append(available - sum(widths))
+    for col, width in zip(table.columns, widths, strict=True):
+        col.width = Twips(width)
+    width = table._tbl.tblPr.find(qn("w:tblW"))
+    width.set(qn("w:type"), "dxa")
+    width.set(qn("w:w"), str(available))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    # New cells inherit the grid widths; creating the headers earlier leaves equal-width cells.
+    table.add_row()
+    table.add_row()
+    group_ends = set()
     for j, label in enumerate(("评估指标", "分级", "分值范围", "取值", "权重系数 γij", "评估分值 Xij", "说明")):
         cell = table.cell(1, j) if j in (2, 3) else table.cell(0, j).merge(table.cell(1, j))
         cell.text = label
@@ -317,6 +348,7 @@ def _layout_table(document, handoff, short, bands, title, cfg, flags):
                     range_cell._tc.get_or_add_tcPr().append(shading)
             last_interval = interval
         last = len(table.rows) - 1
+        group_ends.add(last)
         summary = short.get(key, "")
         if not summary or len(summary) > 40:
             flags.append(f"{title} | {key}: supply one short explanation (up to 40 characters)")
@@ -324,16 +356,31 @@ def _layout_table(document, handoff, short, bands, title, cfg, flags):
             cell = table.cell(first, j)
             if first != last:
                 cell = cell.merge(table.cell(last, j))
-            cell.text = val if j != 6 or len(val) <= 40 else ""
+            cell.text = _display(val, cfg).replace("**", "") if j != 6 or len(val) <= 40 else ""
             if j == 6 and len(val) > 40:
                 _note(document, [cell.paragraphs[0].add_run("\u200b")], val, cfg)
             if j == 3:
                 _note(document, cell.paragraphs[0].runs, "已核定行：" + " | ".join(row), cfg)
+                measurement_cells[key] = (cell.paragraphs[0], row[-1])
     cells = table.add_row().cells
     cells[0].merge(cells[4]).text = "合计"
     total = cells[5].merge(cells[6])
     total.text = baseline
     _note(document, total.paragraphs[0].runs, "总分按各项取值×权重未经舍入求和；表中各项评估分值保留两位小数，合计可能相差0.01", cfg)
+    physical_rows = table._tbl.tr_lst
+    for index, tr in enumerate(physical_rows):
+        tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+        for tc in tr.tc_lst:
+            for node in tc.p_lst:
+                para = Paragraph(node, table)
+                para.paragraph_format.first_line_indent = Pt(0)
+                node.get_or_add_pPr().ind.set(qn("w:firstLineChars"), "0")
+                para.paragraph_format.keep_with_next = index not in group_ends and index < len(physical_rows) - 1
+                para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                for run in para.runs:
+                    run.font.size = Pt(float(cfg["table_size"]))
+        if index >= 2 and len(tr.tc_lst) == 7:
+            tr.tc_lst[2].get_or_add_tcPr().append(OxmlElement("w:noWrap"))
     return True
 
 
@@ -369,7 +416,7 @@ def _layout_drawing(document, case, drawing, citations, cfg, flags, anchor):
                             region.save(data, format="PNG")
                             sec = document.sections[-1]
                             document.add_picture(data, width=sec.page_width - sec.left_margin - sec.right_margin)
-                            caption = f"{drawing['caption']}（来源：{filename} 第{page}页）"
+                            caption = f"{drawing['caption']}（来源：{Path(filename).stem} 第{page}页）"
                             document.add_paragraph(caption, style=cfg["caption_style"])
                             print(f"{caption} | {region.width} × {region.height} px, 200 dpi")
                             return
@@ -384,6 +431,7 @@ def _section(document, path, name, root_level, cfg, layout=None, flags=None):
     case = path.parents[2]
     profile = (layout or {}).get("sections", {}).get(name)
     short, citations, handoff = {}, set(), ""
+    measurement_cells = {}
     drawing_done = quoted = False
     flags = flags if flags is not None else []
     if profile is not None:
@@ -410,7 +458,7 @@ def _section(document, path, name, root_level, cfg, layout=None, flags=None):
     for i, (kind, value) in enumerate(blocks):
         if kind == "table":
             if profile is not None and handoff and _scoring_table(["|" + "|".join(value[0][0]) + "|"]):
-                if not _layout_table(document, handoff, short, layout.get("bands", {}), profile.get("caption", name), cfg, flags):
+                if not _layout_table(document, handoff, short, layout.get("bands", {}), profile.get("caption", name), cfg, flags, measurement_cells):
                     flags.append(f"{name}: incomplete checked table or band settings")
                     _table(document, *value, cfg)
             else:
@@ -466,6 +514,9 @@ def _section(document, path, name, root_level, cfg, layout=None, flags=None):
                 and not any(k == "paragraph" and v.startswith(">") for k, v in blocks[i + 1:])):
             _layout_drawing(document, case, profile["drawing"], citations, cfg, flags, previous)
             drawing_done = True
+    if measurement_cells:
+        body = [p for p in paragraphs if p._p.getparent() is document.element.body]
+        _measurement_notes(document, name, measurement_cells, body, cfg.get("_measurements", {}), cfg, flags)
     if profile is not None:
         if profile.get("require_excerpt") and not quoted:
             flags.append(f"{name} | 缺少附原页的设计摘录")
@@ -477,10 +528,14 @@ def _section(document, path, name, root_level, cfg, layout=None, flags=None):
     return heading, paragraphs
 
 
-def _anchor(paragraphs, sentence, heading):
+def _anchor(paragraphs, sentence, heading, *, numeric=False):
     sentence = sentence.strip().removeprefix("「").removesuffix("」")
     for paragraph in paragraphs:
-        start = paragraph.text.find(sentence) if sentence else -1
+        if numeric:
+            match = re.search(r"(?<![\d.])" + re.escape(sentence) + r"(?![\d.])", paragraph.text)
+            start = match.start() if match else -1
+        else:
+            start = paragraph.text.find(sentence) if sentence else -1
         if start < 0:
             continue
         end = start + len(sentence)
@@ -528,6 +583,95 @@ def _sheet_rows(target, cfg, sheet_path="xl/worksheets/sheet1.xml"):
         if label in fields:
             columns.setdefault(fields[label], col)
     return [{field: row.get(col, "") for field, col in columns.items()} for row in rows[1:]]
+
+
+def _measurement_register(target):
+    """Read checkpoint groups by their declared columns, independent of sheet/column order."""
+    groups = defaultdict(list)
+    if target.is_file():
+        with ZipFile(target) as book:
+            parts = [n for n in book.namelist() if re.fullmatch(r"xl/worksheets/[^/]+\.xml", n)]
+        fields = dict(sheet_columns="边坡|指标|取值（坐标与长度为 m）|图纸与取值依据|取值方法|请核实事项",
+                      sheet_fields="section|indicator|values|source|method|question")
+        for part in parts:
+            for row in _sheet_rows(target, fields, part):
+                if row.get("section") and row.get("indicator") and row.get("values"):
+                    groups[row["section"], row["indicator"]].append(row)
+    return groups
+
+
+def _marked_values(reason):
+    """Read marked lengths/angles from survey clauses, excluding direct labels and score arithmetic."""
+    measured = {}
+    for clause in re.split(r"[；;。！？\n]", reason):
+        cad = re.search(r"(?:按\s*CAD[^；;]{0,22}量测|图层量测端点)", clause, re.I)
+        if cad:
+            if "端点" in cad[0]:
+                # Reused endpoints follow the citation for the separately labelled water level.
+                evidence = clause[:cad.start()].rsplit("]", 1)[-1]
+            else:
+                prefix = re.split(r"[：:。]", clause[:cad.start()])[-1]
+                angles = re.findall(r"(?:角|坡度|α[nd])\s*[=＝]?\s*([−-]?\d+(?:\.\d+)?°)", prefix)
+                evidence = " ".join(angles) + " " + clause[cad.end():].split("Δα", 1)[0]
+            evidence = re.sub(r"\[[^\]]*\]", "", evidence)
+            for m in re.finditer(r"(?<![\d.])([−-]?\d+(?:\.\d+)?)\s*(°|m\b|米|(?=[～~][−-]?\d+(?:\.\d+)?\s*m))", evidence):
+                measured[m[1] + ("°" if m[2] == "°" else "")] = "按 CAD 图纸量测"
+    if "折算" in reason:
+        for m in re.finditer(r"(?:水平投影(?:长度)?\s*|(?<![A-Za-z])L\s*)[=＝]\s*(?:[\d.＋+×*/() −-]+[=＝]\s*)?(\d+(?:\.\d+)?)\s*(?:m\b|米)", reason):
+            measured.setdefault(m[1], "按图注折算")
+    for match in re.finditer(r"按(?:图注|图纸标注)折算(?:得|为|出)?[：:\s]*(?:[\u4e00-\u9fff]{1,10}[=＝为]\s*)?([−-]?\d+(?:\.\d+)?)\s*(m\b|米|°)", reason):
+        measured.setdefault(match[1] + ("°" if match[2] == "°" else ""), "按图注折算")
+    return measured
+
+
+def _measurement_notes(document, section, cells, body, register, cfg, flags):
+    for indicator, (fallback, reason) in cells.items():
+        links = defaultdict(list)
+        for (scope, key), groups in register.items():
+            if key != indicator or not (section == scope or section.startswith(scope + "-")):
+                continue
+            for group in groups:
+                for number in map(str.strip, re.split(r"[、,，;；]", group["values"])):
+                    if number:
+                        links[number].append(group)
+        measured = _marked_values(reason)
+        evidence_by_value = dict.fromkeys(measured, reason)
+        for para in body:
+            if set(re.findall(r"\bX\d{2}\b", para.text)) == {indicator}:
+                for number, method in _marked_values(para.text).items():
+                    measured.setdefault(number, method)
+                    evidence_by_value.setdefault(number, para.text)
+        for number in dict.fromkeys([*links, *measured]):
+            pattern = r"(?<![\d.])" + re.escape(number) + r"(?![\d.])"
+            evidence = evidence_by_value.get(number, reason)
+            if not re.search(pattern, evidence):
+                flags.append(f"{section} | {indicator} {number} 核查表取值未见于核定行")
+                continue
+            if number not in measured:
+                flags.append(f"{section} | {indicator} {number} 核查表取值未标注为量测或折算")
+                continue
+            groups = links.get(number, [])
+            source = "；".join(dict.fromkeys(g["source"] for g in groups if g.get("source")))
+            method = "；".join(dict.fromkeys(g["method"] for g in groups if g.get("method")))
+            questions = list(dict.fromkeys(g["question"] for g in groups if g.get("question")))
+            how = measured[number]
+            note = f"{indicator} {number}：原始资料未给出，{how}。\n{method or evidence}"
+            if source:
+                note += "\n依据：" + source
+            elif method:
+                note += "\n依据：" + evidence
+            if questions:
+                note += "\n量测与折算核查：" + "；".join(questions)
+            else:
+                flags.append(f"{section} | {indicator} {number} 缺少量测核查问题")
+                note += "\n缺少对应的量测核查问题。"
+            # The full checked reason is itself a Word comment. If no body occurrence exists,
+            # anchor on this indicator's value cell, never on an unrelated slope or heading.
+            reused = any(key != indicator and re.search(pattern, other) for key, (_, other) in cells.items())
+            candidates = [p for p in body if re.search(pattern, p.text) and
+                          (indicator in p.text or (not reused and not re.search(r"\bX\d{2}\b", p.text)))]
+            anchor, _ = _anchor(candidates, number, fallback, numeric=True)
+            _note(document, anchor, note, cfg)
 
 
 def answered_client_rows(target, cfg):
@@ -794,7 +938,7 @@ def _replace_fixed_text(paragraph, values):
     return "".join(n.text or "" for n in nodes)
 
 
-def _fixed_sections(case, document, flags):
+def _fixed_sections(case, document, flags, *, layout=None):
     path = case / "commission/fixed-text.docx"
     if not path.is_file():
         return {}
@@ -811,7 +955,21 @@ def _fixed_sections(case, document, flags):
         if any(p.partname == name for p in package.iter_parts()):
             stem, dot, suffix = str(name).rpartition(".")
             name = package.next_partname(stem + "-fixed%d" + dot + suffix)
-        cloned = parts[part] = Part(name, part.content_type, part.blob, package)
+        blob = part.blob
+        if layout and part.content_type.endswith(".footer+xml"):
+            footer = deepcopy(part.element)
+            for ref in footer.xpath(".//w:pStyle | .//w:rStyle | .//w:tblStyle"):
+                ref.val = copy_style(ref.val)
+            # Text boxes carrying PAGE fields inherit paragraph indents from the destination
+            # template; reset the field indent so two- and three-digit numbers stay visible.
+            for field in footer.xpath(".//w:txbxContent//w:instrText"):
+                if field.text and field.text.strip().split()[0] == "PAGE":
+                    para = next(field.iterancestors(qn("w:p")))
+                    fmt = Paragraph(para, document).paragraph_format
+                    fmt.first_line_indent = Pt(0)
+                    para.get_or_add_pPr().ind.set(qn("w:firstLineChars"), "0")
+            blob = serialize_part_xml(footer)
+        cloned = parts[part] = Part(name, part.content_type, blob, package)
         for rel in part.rels.values():
             child = rel.target_ref if rel.is_external else copy_part(rel.target_part)
             cloned.load_rel(rel.reltype, child, rel.rId, rel.is_external)
@@ -943,6 +1101,10 @@ def export_docx(case_dir):
         if cfg["footer_field"] and not any(cfg["footer_field"] in (n.text or "") for n in section.footer._element.iter(qn("w:instrText"))):
             _field(section.footer.paragraphs[0], cfg["footer_field"])
     layout = report_layout(case)
+    if layout:
+        cfg["_source_titles"] = {p.name: cfg["source_title_format"].replace("{stem}", p.stem) for folder in ("sources", "commission")
+                                 for p in (case / folder).glob("*.md")}
+        cfg["_source_titles"].update(layout.get("source_titles", {}))
     flags = []
     if layout.get("freeze"):
         hashes = layout.get("fixed_hashes", {})
@@ -951,7 +1113,7 @@ def export_docx(case_dir):
             actual = sha256(source.read_bytes()).hexdigest() if source.is_file() else None
             if actual != hashes.get(filename) or (filename.endswith(".docx") and actual is None):
                 raise ValueError(f"Frozen chapter source differs from its accepted copy: {filename}")
-    fixed = _fixed_sections(case, document, flags)
+    fixed = _fixed_sections(case, document, flags, layout=layout)
     for name in layout.get("freeze", []):
         heading = re.sub(r"^[\d.、．\s-]+", "", _title(name, cfg))
         if (1, name) not in order or not fixed.get(heading):
@@ -960,6 +1122,8 @@ def export_docx(case_dir):
     answer_sections = {}
     destinations, snapshot, answers = export_answers(case, cfg, answer_sections)
     xlsx = destinations["client"]
+    if layout:
+        cfg["_measurements"] = _measurement_register(xlsx)
     registers = snapshot.parent
     records, scores = [], {}
     pattern = _material_pattern(case)
@@ -1002,11 +1166,11 @@ def export_docx(case_dir):
                 flags.append(f"{name} | question {number} | audience unclassified")
             position = item.get("anchor", "")
             if audience == "client":
-                anchor, position = _anchor(paragraphs, item["anchor"], heading)
+                anchor, position = _anchor(paragraphs, _display(item["anchor"], cfg), heading)
                 text = cfg["item_prefix"] + str(number) + "\n" + item["content"]
                 if item.get("sources"):
                     text += "\n" + cfg["citation_prefix"] + item["sources"]
-                document.add_comment(anchor, text, author=cfg["comment_author"])
+                _note(document, anchor, text, cfg)
             status, answer, responder = answers.get(number, [cfg["item_status"], "", ""])
             status = item.get("status", status)
             if number in conflicts:
@@ -1036,6 +1200,11 @@ def export_docx(case_dir):
             continue
         rows = [[item.get(field, "") for field in fields] for item in selected]
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if audience == "client" and cfg.get("_measurements"):
+            # The single-sheet writer cannot recreate the operator’s supplemental checkpoint sheet.
+            destination = registers / "client-proposed.xlsx"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            flags.append(f"Client measurement workbook preserved; proposed client questions: {destination.name}")
         _xlsx(destination, cfg["sheet_columns"].split("|"), rows, cfg)
         if audience == "client":
             for row, (values, item) in enumerate(zip(rows, selected), 2):

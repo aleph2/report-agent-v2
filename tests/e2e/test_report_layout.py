@@ -20,6 +20,8 @@ def test_report_layout_preserves_checked_values_and_sources(tmp_path):
     (pages / "page-001.txt").write_text("The   design is reinforced.")
     (template / "report-layout.toml").write_text("""
 process_patterns = ["待核实"]
+[source_titles]
+"internal-notes.md" = "设计复核记录"
 [sections.slope]
 caption = "表4.1.1.4-2 测试边坡施工安全总体风险评估表"
 drawing = {file = "design.pdf", page = 1, caption = "图4.1.1 K1+000 典型断面图"}
@@ -34,14 +36,14 @@ X12 = [["高", "50–100"], ["低", "0–49"]]
     handoff = """| 指标 | 档位 | 基本分值范围 | Rij | γij | Xij | 取值说明 |
 |---|---|---|---|---|---|---|
 | X11 高度 | 低 | 0–49 | 40 | 0.25 | 10.00 | 详细依据甲 |
-| X12 坡形 | 高 | 50–100 | 60 | 0.75 | 45.00 | 详细依据乙 |
+| X12 坡形 | 高 | 50–100 | 60 | 0.75 | 45.00 | 详细依据乙。原始资料未给出，按图注折算水平投影 L=7+2=9 m [design.pdf, page 1]。 |
 
 基准 F=55.00，III级。
 情景[不利] R11=60 F=60.00，III级。
 """
     (sections / "slope.table.md").write_text(handoff)
     (sections / "slope.md").write_text("# Slope\n\n> The design is reinforced. [design.pdf, page 1]\n\n[[drawing]]\n\n"
-        "第一句。正文。[[note:待核实地下水]]\n\n[[说明 X11:测试高度。]]\n\n[[说明 X12:测试坡形。]]\n\n" + handoff)
+        "第一句。正文。[[note:待核实地下水]]\n\n*R*22=60，*F*=55，2*3=6，2**3=8 [sources/internal-notes.md, page 1]。\n\n[[说明 X11:测试高度。]]\n\n[[说明 X12:测试坡形。]]\n\n" + handoff)
     (sections / "other.md").write_text("# Other\n\n> fabricated. [design.pdf, page 1]\n\n“没有这句话” [design.pdf, page 1]。仍待核实。")
     (sections / "missing.md").write_text("# Missing\n\n[[drawing]]")
     (sections / "wrong.md").write_text("# Wrong\n\n> text. [other.pdf, page 1]\n\n[[drawing]]")
@@ -58,11 +60,21 @@ X12 = [["高", "50–100"], ["低", "0–49"]]
         text.extend(node.xpath(".//w:t/text()"))
     assert "".join(text) == "正文。"
     assert "情景[不利]" in notes and "情景[不利]" not in body
-    assert len(rendered.inline_shapes) == 1 and "design.pdf 第1页" in body
+    assert len(rendered.inline_shapes) == 1 and "design 第1页" in body
+    assert "R22=60，F=55，2*3=6，2^3=8" in body
+    assert "设计复核记录" in notes and ".md" not in notes and "**" not in body
     assert "Wrong figure" not in body and "断面图" in notes
     assert "表4.1.1.4-2" in body
     table, = rendered.tables
     assert len(table.columns) == 7
+    section = rendered.sections[-1]
+    available = (section.page_width - section.left_margin - section.right_margin) // 635
+    for tr in table._tbl.tr_lst:
+        assert sum(int(tc.tcPr.tcW.w) for tc in tr.tc_lst) + 20 == available
+        assert tr.xpath("./w:trPr/w:cantSplit")
+        assert all(p.xpath("./w:pPr/w:ind/@w:firstLine") == ["0"] for p in tr.xpath("./w:tc/w:p"))
+    assert all(tr.xpath("./w:trPr/w:tblHeader") for tr in table._tbl.tr_lst[:2])
+    assert "9 m" in notes and "按图注折算" in notes
     assert [table.cell(i, 1).text for i in (2,3,4,5)] == ["高", "低", "高", "低"]
     assert table.cell(2, 3)._tc is table.cell(3, 3)._tc
     assert table.cell(2, 6).text == "测试高度。"
@@ -77,7 +89,76 @@ X12 = [["高", "50–100"], ["低", "0–49"]]
     ]
     assert (sections / "slope.table.md").read_text() == handoff
     report = (case / "out/client-readiness.txt").read_text()
+    assert "缺少量测核查问题" in report
     assert "fabricated." in report and "没有这句话" in report and "仍待核实" in report and "待核实地下水" not in report
+
+def test_measured_values_match_checked_evidence_and_real_questions(tmp_path):
+    from reportagent.export.docx import _measurement_notes, _measurement_register, _settings, _xlsx
+
+    cfg = _settings(tmp_path)
+    workbook = tmp_path / "checkpoints.xlsx"
+    headers = ["边坡", "指标", "取值（坐标与长度为 m）", "图纸与取值依据", "取值方法", "请核实事项"]
+    group = ["S", "X12", "−19.25、8.75、37.4°、99.99", "图 A，第9页，sjx 图层", "按 CAD 量测。", "请核对 A 图取点。"]
+    _xlsx(workbook, headers, [group], cfg)
+    reason = ("当坡角＜5°时取低档：设计坡角 αd=37.4°，原始资料未给出，按 CAD 图纸 sjx 图层量测"
+              "（图 A，第9页，坡脚 −19.25 m，水平距 8.75 m）；99.99 m 为直接标注。")
+    for available in (True, False):
+        doc = Document()
+        value = doc.add_paragraph("45")
+        body = doc.add_paragraph("X12 的水平距为 8.75 m。")
+        extra = doc.add_paragraph("X12 按图注折算得 12.5 m，见图 A 第11页。")
+        flags = []
+        register = _measurement_register(workbook if available else tmp_path / "absent.xlsx")
+        _measurement_notes(doc, "S-test", {"X12": (value, reason)}, [body, extra], register, cfg, flags)
+        texts = [c.text for c in doc.comments]
+        assert len(texts) == 4
+        extra_note, = [v for v in texts if v.startswith("X12 12.5")]
+        assert "第11页" in extra_note and "缺少对应" in extra_note
+        texts.remove(extra_note)
+        assert all("第9页" in v and "sjx" in v for v in texts)
+        assert all(("请核对 A 图取点" in v) == available for v in texts)
+        assert {v.split("：", 1)[0] for v in texts} == {"X12 −19.25", "X12 8.75", "X12 37.4°"}
+        assert sum("缺少量测核查问题" in f for f in flags) == (1 if available else 4)
+        assert any("99.99" in f for f in flags) == available
+        assert body._p.xpath(".//w:commentRangeStart")
+        assert value._p.xpath(".//w:commentRangeStart")
+
+
+def test_copied_page_footer_references_styles_in_the_destination(tmp_path):
+    from docx.enum.section import WD_SECTION
+    from docx.oxml.ns import qn
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.oxml import OxmlElement
+    from lxml import etree
+
+    template = tmp_path / "commission/template"
+    template.mkdir(parents=True)
+    (template / "report-layout.toml").write_text("[sections.test]")
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work/plan.md").write_text("---\nsection: 1|01-概述\n---\n")
+    source = Document()
+    source.add_heading("概述", 1)
+    footer = source.sections[0].footer.paragraphs[0]
+    source.styles["Footer"].element.set(qn("w:styleId"), "SourceFooterStyle")
+    footer._p.get_or_add_pPr().get_or_add_pStyle().val = "SourceFooterStyle"
+    box = OxmlElement("w:txbxContent")
+    footer._p.append(box)
+    para = OxmlElement("w:p")
+    box.append(para)
+    run = OxmlElement("w:r")
+    para.append(run)
+    field = OxmlElement("w:instrText")
+    field.text = " PAGE "
+    run.append(field)
+    source.add_section(WD_SECTION.NEW_PAGE)
+    source.save(template.parent / "fixed-text.docx")
+    doc = Document(export_docx(tmp_path))
+    ns = {"w": qn("w:p").split("}")[0][1:]}
+    footers = [etree.fromstring(rel.target_part.blob) for rel in doc.part.rels.values() if rel.reltype == RT.FOOTER]
+    copied, = [tree for tree in footers if tree.xpath("//w:txbxContent", namespaces=ns)]
+    assert copied.xpath("//w:pStyle/@w:val", namespaces=ns) == [doc.styles["Footer"].style_id]
+    assert copied.xpath("//w:txbxContent/w:p/w:pPr/w:ind/@w:firstLineChars", namespaces=ns) == ["0"]
+
 
 def test_feedback_document_cli_without_workbook(tmp_path, monkeypatch):
     import sys

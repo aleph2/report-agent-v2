@@ -33,6 +33,7 @@ body_style: Normal
 table_style: Table Text
 table_size: 10.5
 table_padding: 12
+source_title_format: 《{stem}》
 table_new_page_rows: 0
 table_alignment: center
 table_border: double

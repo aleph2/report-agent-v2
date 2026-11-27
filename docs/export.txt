@@ -22,6 +22,21 @@ The human-readable plan follows. section lines explicitly give order, heading
 level and the Markdown filename stem. With no declared order, Markdown files in
 work/sections are rendered in filename order.
 
+For template-driven reports, the display title of a Markdown source in sources/
+or commission/ uses source_title_format in settings.txt. Override individual
+filenames in commission/template/report-layout.toml, for example:
+
+[source_titles]
+"survey-notes.md" = "Survey field record"
+
+Measurement comments use marked CAD measurements and drawing-derived values in
+the checked indicator row or a paragraph identifying that indicator. The
+supplementary checkpoint sheet can link a slope, indicator and exact value to
+an existing question. A missing link is written to client-readiness.txt. When
+the value is absent from the visible prose the comment is placed on the
+indicator's value cell. The export preserves a workbook with measurement
+groups and puts any proposed single-sheet replacement in work/question-registers/.
+
 work/clarifications/<stem>.md contains blocks separated by a line with ---:
 number: 29
 anchor: 「Exact body sentence.」
