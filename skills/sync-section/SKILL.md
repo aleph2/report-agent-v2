@@ -11,3 +11,5 @@ Keep the existing scoring table in place as a slot. After your prose edits the a
 Use the table's baseline for the assessed slope. When stating an alternative F or grade, label it with the same 情景[名称]. State range endpoints separately under their names. Distinguish generic threshold definitions and explicitly attributed client expectations from the calculated result.
 
 If reviewer notes are supplied, apply each one and state in your final reply which notes you applied.
+
+For cases with a report layout, the section Markdown supports these formats. `[[note:text]]` attaches a Word comment to the preceding sentence. A separate line `> exact text [filename.pdf, page N]` denotes an excerpt. `[[drawing]]` is an optional figure location after the excerpt. A separate line `[[说明 X11:text]]` supplies the indicator’s short table cell (up to 40 characters).

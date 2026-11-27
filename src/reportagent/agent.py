@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from .budget import CALCULATE_FIRST, successful_score
+from .export.docx import report_layout
 from .ingest import profile_data
 from .models import PHASE_SETTINGS
 
@@ -77,7 +78,7 @@ def supplied_notice(paths):
 
 
 class PhaseTools(AgentMiddleware):
-    def __init__(self, phase, policy, case, section, supplied_files):
+    def __init__(self, phase, policy, case, section, supplied_files, frozen=()):
         self.score_tool = ("calculate_score",) if phase in SCORE_PHASES else ()
         self.profile_tools = ("list_profile_layers", "measure_profile") if phase == "rescore" else ()
         self.action = "edit_file" if phase in ("revise", "sync") else "write_file"
@@ -87,6 +88,9 @@ class PhaseTools(AgentMiddleware):
         self.phase = phase
         self.policy = policy
         self.case = case.resolve()
+        self.frozen = {self.case / "work/sections" / (name + ".md") for name in frozen}
+        if frozen:
+            self.frozen.update(self.case / "commission" / p for p in ("fixed-text.docx", "fixed-text-values.txt", "template/report-layout.toml"))
         self.supplied = supplied_files
         self.review_phase = phase in ("verify-sources", "review")
         self.learning = phase == "learn"
@@ -107,7 +111,7 @@ class PhaseTools(AgentMiddleware):
             if self.phase == "rescore" and request.state.get("final_save_rule") and self.target and not self.target.is_file():
                 allowed.discard("edit_file")
             return request.override(tools=[t for t in request.tools if getattr(t, "name", None) in allowed])
-        if any(isinstance(m, AIMessage) for m in request.messages):
+        if self.policy != "force-first" or any(isinstance(m, AIMessage) for m in request.messages):
             return request
         # Bailian accepts a named choice only with thinking disabled on this request.
         body = {**(getattr(request.model, "extra_body", None) or {}), **(request.model_settings.get("extra_body") or {})}
@@ -122,12 +126,14 @@ class PhaseTools(AgentMiddleware):
         return await handler(self._model_request(request))
 
     def _denied(self, call, messages):
+        relative = call["args"].get("file_path", "").lstrip("/")
+        path = (self.case / relative).resolve()
+        if self.frozen and call["name"] in ("write_file", "edit_file") and path in self.frozen:
+            return ToolMessage(content="Accepted chapter source is read-only.", tool_call_id=call["id"], status="error")
         if self.policy != "restricted":
             return None
         if call["name"] in (*self.score_tool, *self.profile_tools):
             return None
-        relative = call["args"].get("file_path", "").lstrip("/")
-        path = (self.case / relative).resolve()
         message = "This phase may read /sources/ pages (find them in /index.md) and save its own file."
         if self.two_step:
             if call["name"] in self.actions and path == self.target:
@@ -211,8 +217,9 @@ def build_agent(case_dir, model, middleware=(), *, checkpointer=None, phase=None
             copytree(files("reportagent.skills").joinpath(skill),
                      case_dir / f"work/skills/{skill}", dirs_exist_ok=True)
     policy = PHASE_SETTINGS.get(phase, {}).get("tool_policy")
-    if policy == "restricted" or (phase in ("clarify", "revise") and policy == "force-first"):
-        middleware = [PhaseTools(phase, policy, case_dir, section, supplied_files), *middleware]
+    frozen = report_layout(case_dir).get("freeze", ())
+    if frozen or policy == "restricted" or (phase in ("clarify", "revise") and policy == "force-first"):
+        middleware = [PhaseTools(phase, policy, case_dir, section, supplied_files, frozen), *middleware]
     tools = [calculate_score] if phase in SCORE_PHASES else []
     if phase in ("gather", "rescore"):
         tools.extend(_profile_tools(case_dir))

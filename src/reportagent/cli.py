@@ -24,8 +24,8 @@ from langsmith import tracing_context
 from . import learn
 from .agent import PHASE_SKILLS, build_agent, score_result, supplied_notice
 from .budget import CALCULATE_FIRST, TokenCapMiddleware, estimate_input
-from .export.docx import (FIXED_FIELDS, _SCENARIO, _VALUE, _plan, _risk_statements, _settings, answered_client_rows,
-                          clarification_numbers, export_answers, export_docx, fixed_values, section_flags)
+from .export.docx import (layout_pages, FIXED_FIELDS, _SCENARIO, _VALUE, _plan, _risk_statements, _settings, answered_client_rows,
+                          clarification_numbers, export_answers, export_docx, fixed_values, report_layout, section_flags)
 from .ingest import ingest
 from .models import PHASE_SETTINGS, make_model
 
@@ -802,7 +802,7 @@ def _preflight(case, section, phase, messages, cap):
 def _propose(args, parser):
     case = args.case.resolve()
     library = args.library or case.parent.parent / "lessons"
-    messages = [HumanMessage(content=learn.proposal_prompt(case, library))]
+    messages = [HumanMessage(content=learn.proposal_prompt(case, library, args.feedback))]
     floor = _preflight(case, None, "learn", messages, args.max_tokens)
     if args.preflight:
         return
@@ -815,10 +815,10 @@ def _propose(args, parser):
         if target.is_file():
             backup = target.with_name(f"proposals-{receipt['run_id']}.md")
             copyfile(target, backup)
-        _run_phase(case, "learn", messages, args.max_tokens, runs, receipt=receipt)
+        _run_phase(case, "learn", messages, args.max_tokens, runs, receipt=receipt, retry_disconnect=not args.feedback)
 
 
-def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=None, receipt=None):
+def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=None, receipt=None, retry_disconnect=True):
     state = {"messages": messages}
     calls = ModelCallLimitMiddleware(run_limit=200, exit_behavior="end")
     log = folder / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + f"-{phase}.jsonl")
@@ -830,6 +830,7 @@ def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=N
                              request_log=log.with_suffix(".requests.jsonl"))
     config = {"configurable": {"thread_id": log.stem}, "max_concurrency": 1}
     resume = None
+    resume_errors = (APIConnectionError, NetworkError, RemoteProtocolError, TimeoutException) if retry_disconnect else ()
     try:
         model = make_model(phase)
         agent = build_agent(case, model, middleware=[cap, calls], checkpointer=InMemorySaver(),
@@ -839,7 +840,7 @@ def _run_phase(case, phase, messages, limit, folder, previous_total=0, section=N
         try:
             for state in agent.stream(state, config=config, stream_mode="values", durability="sync"):
                 pass
-        except (APIConnectionError, NetworkError, RemoteProtocolError, TimeoutException) as error:
+        except resume_errors as error:
             state = agent.get_state(config).values
             resume = (len(state["messages"]), json.dumps({
                 "type": "resume", "phase": phase, "thread_id": log.stem,
@@ -1018,6 +1019,11 @@ def _phase_messages(case, name, phase, prompt):
         blocks = ([f"Rescore {name}. Save /{table}.", "Current scoring and applicability excerpt:\n" +
                    _score_excerpt((case / body).read_text(encoding="utf-8-sig").splitlines())]
                   if phase == "rescore" else [f"Synchronize the following section /{body} to the checked table /{table}."])
+        if phase == "sync" and not (case / table).exists():
+            paths = [body]
+            blocks = [f"Synchronize /{body} using the supplied sources and adopted lessons."]
+        if phase == "sync":
+            paths += layout_pages(case, name)
         for path in paths:
             value = (case / path).read_text(encoding="utf-8-sig") if (case / path).is_file() else "(unavailable)"
             blocks.append(f"/{path}\n{value}")
@@ -1042,7 +1048,8 @@ def _rescore_answers(case, cfg):
 
 def _stage_messages(case, name, phase, prompt, lessons, extra):
     messages = _phase_messages(case, name, phase, prompt)
-    if lessons and phase in ("plan", "gather", "write", "clarify", "revise", "rescore"):
+    if lessons and (phase in ("plan", "gather", "write", "clarify", "revise", "rescore") or
+                    (phase == "sync" and (case / "commission/template/report-layout.toml").is_file())):
         messages[0].content += "\n\nOwner-adopted lessons for reference:\n" + lessons
         if phase == "clarify":
             messages[0].content += "\nAsk the client to confirm applicable DEFAULT lessons for this case."
@@ -1086,10 +1093,46 @@ def _phase_overrides(specs, selected, parser):
     return overrides
 
 
-def _stage(case, stage, cap, specs, parser, library=None, sections=None):
+def _sync_only(case, names, cap, limit, library, parser):
+    layout = report_layout(case)
+    runs = case / "work/runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    remaining = cap
+    for name in dict.fromkeys(names):
+        if name in layout.get("freeze", ()):
+            parser.error(f"Frozen chapter cannot be synchronized: {name}")
+        body = case / "work/sections" / (name + ".md")
+        table = body.with_suffix(".table.md")
+        if not body.is_file() or any(not p.resolve().is_relative_to(case.resolve()) for p in (body, table)):
+            parser.error(f"Missing or external section: {name}")
+        checked = table.read_bytes() if table.is_file() else None
+        handoff = checked.decode("utf-8-sig") if checked is not None else None
+        if handoff is None and (_scoring_table(body.read_text(encoding="utf-8-sig").splitlines()) or
+                                layout.get("sections", {}).get(name, {}).get("caption")):
+            parser.error(f"Missing checked score table: {name}")
+        if handoff is not None and (findings := _table_gate(handoff)):
+            parser.error(f"{name}: {' | '.join(findings)}")
+        if remaining <= 0:
+            parser.exit(1, f"No tokens left for {name}.\n")
+        messages = _stage_messages(case, name, "sync", None, learn.library_text(library), "")
+        allowance = min(limit, remaining)
+        with learn.observe_run(case, name, "sync-only", allowance, None) as receipt:
+            log, used = _run_phase(case, "sync", messages, allowance, runs, cap - remaining, name, receipt)
+        remaining -= used
+        if (table.read_bytes() if table.is_file() else None) != checked or not _updated_in_place(log, body.relative_to(case).as_posix(), "sync"):
+            parser.exit(1, f"{name}: checked table changed or sync unfinished.\n")
+        if handoff is not None:
+            text = _sync_table(body.read_text(encoding="utf-8-sig"), handoff)
+            if findings := _table_gate(text, handoff):
+                parser.exit(1, f"{name}: {' | '.join(findings)}\n")
+            learn._save_bytes(body, (b"\xef\xbb\xbf" if body.read_bytes().startswith(b"\xef\xbb\xbf") else b"") + text.encode())
+        print(f"{name}: sync complete | checked table unchanged | {used} tokens")
+
+
+def _stage(case, stage, cap, specs, parser, library=None, sections=None, sync_only=False):
     if cap < 0:
         parser.error("--max-tokens must be nonnegative")
-    selected = STAGE_PHASES[stage]
+    selected = ("sync",) if sync_only else STAGE_PHASES[stage]
     overrides = _phase_overrides(specs, selected, parser)
 
     def plan_names():
@@ -1102,6 +1145,10 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
         if unknown:
             parser.error(f"Unknown --section: {', '.join(unknown)}. Valid plan sections: {', '.join(names) or '(none)'}")
 
+    if sync_only:
+        if not sections or any(Path(s).name != s or "\\" in s for s in sections):
+            parser.error("--sync-only requires explicit --section names")
+        return _sync_only(case, sections, cap, overrides.get("sync", 200000), library, parser)
     work = case / "work"
     runs = work / "runs"
     runs.mkdir(parents=True, exist_ok=True)
@@ -1177,7 +1224,10 @@ def _stage(case, stage, cap, specs, parser, library=None, sections=None):
     unfinished = []
     pending_elsewhere = False
     stopped = False
+    frozen = report_layout(case).get("freeze", ())
     for name in names:
+        if name in frozen:
+            continue
         body = work / "sections" / (name + ".md")
         notes = work / "notes" / (name + ".md")
         questions = work / "clarifications" / (name + ".md")
@@ -1719,6 +1769,8 @@ def main():
             command.add_argument("--max-tokens", type=int, required=True)
         if name in ("stage1", "stage2"):
             command.add_argument("--section", action="append", metavar="NAME", help="select a plan section (repeatable)")
+        if name == "stage2":
+            command.add_argument("--sync-only", action="store_true", help="synchronize selected drafts against immutable checked inputs")
         if name in ("review", "revise", "check"):
             command.add_argument("--section", required=name != "check")
         if name == "check":
@@ -1760,7 +1812,7 @@ def main():
 
 def _execute(args, parser, receipt):
     if args.command in ("stage1", "stage2"):
-        return _stage(args.case, args.command, args.max_tokens, args.phase_cap, parser, args.library, args.section)
+        return _stage(args.case, args.command, args.max_tokens, args.phase_cap, parser, args.library, args.section, getattr(args, "sync_only", False))
     if args.command == "replay":
         if args.batch and not args.section:
             parser.error("--batch requires --section")

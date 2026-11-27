@@ -1,7 +1,9 @@
 from collections import Counter, defaultdict
+from contextlib import closing
 from copy import deepcopy
 from importlib.resources import files
 from io import BytesIO
+from hashlib import sha256
 from html import unescape
 from pathlib import Path
 from math import ceil
@@ -10,6 +12,8 @@ from xml.etree.ElementTree import Element, SubElement, fromstring, tostring
 from zipfile import ZipFile, ZIP_DEFLATED
 import re
 import unicodedata
+import tomllib
+import pypdfium2 as pdfium
 from decimal import Decimal
 
 from docx import Document
@@ -225,15 +229,192 @@ def _title(text, cfg):
     return re.sub(cfg["heading_pattern"], "", text).strip() if cfg["heading_pattern"] else text
 
 
-def _section(document, path, name, root_level, cfg):
-    blocks = list(_blocks(path.read_text(encoding="utf-8-sig"), cfg))
+def feedback_text(path):
+    if path.suffix.lower() != ".docx":
+        return path.read_text(encoding="utf-8-sig")
+    body = Document(path).element.body
+    paragraphs = ["".join(p.xpath(".//w:t/text()")) for p in body.xpath(".//w:p")]
+    return "\n".join(paragraphs + body.xpath(".//wp:docPr/@descr"))
+
+
+def report_layout(case):
+    path = case / "commission/template/report-layout.toml"
+    return tomllib.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
+
+
+def layout_pages(case, section):
+    sources = (case / "sources").resolve()
+    pages = report_layout(case).get("sections", {}).get(section, {}).get("excerpts", {})
+    paths = []
+    for filename, numbers in pages.items():
+        pdf = (sources / filename).resolve()
+        if not pdf.is_relative_to(sources) or not pdf.is_file() or pdf.suffix.lower() != ".pdf":
+            raise ValueError(f"Invalid design source for {section}: {filename}")
+        for page in numbers:
+            cache = pdf.with_suffix("") / f"page-{page:03d}.txt"
+            if page < 1 or not cache.is_file() or not cache.resolve().is_relative_to(sources):
+                raise ValueError(f"Missing cached design page: {filename} p.{page}")
+            paths.append("sources/" + cache.relative_to(sources).as_posix())
+    return paths
+
+
+def _note(document, runs, text, cfg):
+    document.add_comment(runs, text, author=cfg["comment_author"])
+
+
+def _body_inline(document, paragraph, text, cfg, previous):
+    for part in re.split(r"(\[\[note:.*?\]\](?!\]))", text):
+        if part.startswith("[[note:") and part.endswith("]]"):
+            _note(document, previous or [paragraph.add_run("\u200b")], part[7:-2].strip(), cfg)
+        elif part:
+            previous = _inline(document, paragraph, part, cfg, previous)
+    return previous
+
+
+def _layout_table(document, handoff, short, bands, title, cfg, flags):
+    from ..cli import _scoring_table
+    lines = handoff.splitlines()
+    frame = _scoring_table(lines)
+    if not frame:
+        return False
+    start, end, (indicator, value, weight, product) = frame
+    rows = [_cells(s) for s in lines[start + 2:end]]
+    if any(len(row) <= max(indicator, value, weight, product) for row in rows):
+        return False
+    identifiers = [re.search(r"\bX\d{2}\b", row[indicator]) for row in rows]
+    baseline = next((s for s in lines[end:] if s.startswith("基准") and "F" in s), "")
+    if not rows or not baseline or any(not code or not bands.get(code[0]) for code in identifiers):
+        return False
+    document.add_paragraph(title, style=cfg["caption_style"]).paragraph_format.keep_with_next = True
+    table = document.add_table(rows=2, cols=7)
+    table.style = "Table Grid"
+    available = document.sections[-1].page_width - document.sections[-1].left_margin - document.sections[-1].right_margin
+    table.autofit = False
+    for col, fraction in zip(table.columns, (.12, .34, .10, .07, .08, .09, .20)):
+        col.width = int(available * fraction)
+    for j, label in enumerate(("评估指标", "分级", "分值范围", "取值", "权重系数 γij", "评估分值 Xij", "说明")):
+        cell = table.cell(1, j) if j in (2, 3) else table.cell(0, j).merge(table.cell(1, j))
+        cell.text = label
+    table.cell(0, 2).merge(table.cell(0, 3)).text = "基本分值（Rij）"
+    for row in table.rows:
+        row._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
+    for row, code in zip(rows, identifiers):
+        key = code[0]
+        first = len(table.rows)
+        last_interval, range_cell = None, None
+        for label, interval in bands[key]:
+            cells = table.add_row().cells
+            cells[1].text = label
+            if interval == last_interval:
+                range_cell = range_cell.merge(cells[2])
+            else:
+                range_cell = cells[2]
+                range_cell.text = interval
+                bounds = re.fullmatch(r"\s*(\d+)\s*[-~–—～]\s*(\d+)\s*", interval)
+                if bounds and Decimal(bounds[1]) <= Decimal(row[value]) <= Decimal(bounds[2]):
+                    shading = OxmlElement("w:shd")
+                    shading.set(qn("w:fill"), "DDEBF7")
+                    range_cell._tc.get_or_add_tcPr().append(shading)
+            last_interval = interval
+        last = len(table.rows) - 1
+        summary = short.get(key, "")
+        if not summary or len(summary) > 40:
+            flags.append(f"{title} | {key}: supply one short explanation (up to 40 characters)")
+        for j, val in ((0, row[indicator]), (3, row[value]), (4, row[weight]), (5, row[product]), (6, summary)):
+            cell = table.cell(first, j)
+            if first != last:
+                cell = cell.merge(table.cell(last, j))
+            cell.text = val if j != 6 or len(val) <= 40 else ""
+            if j == 6 and len(val) > 40:
+                _note(document, [cell.paragraphs[0].add_run("\u200b")], val, cfg)
+            if j == 3:
+                _note(document, cell.paragraphs[0].runs, "已核定行：" + " | ".join(row), cfg)
+    cells = table.add_row().cells
+    cells[0].merge(cells[4]).text = "合计"
+    total = cells[5].merge(cells[6])
+    total.text = baseline
+    _note(document, total.paragraphs[0].runs, "总分按各项取值×权重未经舍入求和；表中各项评估分值保留两位小数，合计可能相差0.01", cfg)
+    return True
+
+
+_PAGE_REF = r"\s*\[([^\]\n]+\.pdf),\s*page\s+([1-9]\d*)\]"
+
+
+def _quoted_page(case, profile, quoted, filename, page):
+    from ..cli import _source_document
+    permitted = profile.get("excerpts") or ([profile["drawing"]["file"]] if profile.get("drawing") else ())
+    sources = (case / "sources").resolve()
+    pdf = _source_document(sources, filename)
+    if not pdf or (permitted and filename not in permitted) or not quoted.strip():
+        return False
+    cache = pdf.with_suffix("") / f"page-{int(page):03d}.txt"
+    return (cache.is_file() and cache.resolve().is_relative_to(sources) and
+            "".join(quoted.split()) in "".join(cache.read_text(encoding="utf-8-sig").split()))
+
+
+def _layout_drawing(document, case, drawing, citations, cfg, flags, anchor):
+    from ..cli import _source_document
+    if drawing:
+        filename, page = drawing["file"], drawing["page"]
+        pdf = _source_document((case / "sources").resolve(), filename)
+        if pdf and pdf.suffix.lower() == ".pdf" and (filename, page) in citations:
+            with pdfium.PdfDocument(pdf) as source:
+                if 1 <= page <= len(source):
+                    with closing(source[page - 1]) as sheet, closing(sheet.render(scale=200 / 72)) as bitmap:
+                        gray = bitmap.to_pil().convert("L")
+                        box = gray.point(lambda p: 255 if p < 210 else 0).getbbox()
+                        if box:
+                            region = bitmap.to_pil().crop(box)
+                            data = BytesIO()
+                            region.save(data, format="PNG")
+                            sec = document.sections[-1]
+                            document.add_picture(data, width=sec.page_width - sec.left_margin - sec.right_margin)
+                            caption = f"{drawing['caption']}（来源：{filename} 第{page}页）"
+                            document.add_paragraph(caption, style=cfg["caption_style"])
+                            print(f"{caption} | {region.width} × {region.height} px, 200 dpi")
+                            return
+    message = "缺少本工点已引用且可核对的断面图。"
+    _note(document, anchor, message, cfg)
+    flags.append(message)
+
+
+def _section(document, path, name, root_level, cfg, layout=None, flags=None):
+    from ..cli import _citations, _scoring_table
+    text = path.read_text(encoding="utf-8-sig")
+    case = path.parents[2]
+    profile = (layout or {}).get("sections", {}).get(name)
+    short, citations, handoff = {}, set(), ""
+    drawing_done = quoted = False
+    flags = flags if flags is not None else []
+    if profile is not None:
+        short = dict(re.findall(r"(?m)^\[\[说明 (X\d{2}):([^\]\n]*)\]\]$", text))
+        text = re.sub(r"(?m)^\[\[说明 X\d{2}:[^\]\n]*\]\]$", "", text)
+        previous_cite = {}
+        for line in text.splitlines():
+            for _, filename, ranges, _ in _citations(line, previous_cite):
+                if profile.get("drawing", {}).get("file") == filename:
+                    page = profile["drawing"]["page"]
+                    if any(lo <= page <= hi for lo, hi in ranges):
+                        citations.add((filename, page))
+        checked = path.with_suffix(".table.md")
+        text = re.sub(r"(?m)^(>[^\n]*|\[\[drawing\]\])$", r"\n\1\n", text)
+        if checked.is_file():
+            handoff = checked.read_text(encoding="utf-8-sig")
+            # Preserve each checked scenario as its own comment anchor before joining Markdown lines.
+            text = "\n".join("\n" + line + "\n" if line.startswith("情景[") and line in handoff.splitlines() else line for line in text.splitlines())
+    blocks = list(_blocks(text, cfg))
     paragraphs, heading, previous = [], None, []
     if not blocks or blocks[0][0] != "heading":
         heading = document.add_heading(_title(name, cfg), root_level)
         paragraphs.append(heading)
     for i, (kind, value) in enumerate(blocks):
         if kind == "table":
-            _table(document, *value, cfg)
+            if profile is not None and handoff and _scoring_table(["|" + "|".join(value[0][0]) + "|"]):
+                if not _layout_table(document, handoff, short, layout.get("bands", {}), profile.get("caption", name), cfg, flags):
+                    flags.append(f"{name}: incomplete checked table or band settings")
+                    _table(document, *value, cfg)
+            else:
+                _table(document, *value, cfg)
             paragraphs.extend(p for row in document.tables[-1].rows for cell in row.cells for p in cell.paragraphs)
             continue
         if kind == "heading":
@@ -242,18 +423,57 @@ def _section(document, path, name, root_level, cfg):
             previous = _inline(document, paragraph, _title(title, cfg), cfg, previous)
             heading = heading or paragraph
         else:
+            if profile is not None:
+                if value == "[[drawing]]":
+                    if not drawing_done:
+                        _layout_drawing(document, case, profile.get("drawing"), citations if quoted else set(), cfg, flags,
+                                        previous or [heading.add_run("\u200b")])
+                    drawing_done = True
+                    continue
+                if value.startswith("情景[") and handoff and value in handoff.splitlines():
+                    _note(document, previous or [heading.add_run("\u200b")], value, cfg)
+                    continue
+                visible = re.sub(r"\[\[note:.*?\]\](?!\])", "", value)
+                if value.startswith(">"):
+                    quote = re.fullmatch(r">\s*(.+?)" + _PAGE_REF, visible.strip(), re.I)
+                    excerpts = [quote] if quote else []
+                    if not quote:
+                        flags.append(f"{name} | 引文缺少单一原页：{value}")
+                    value = value.lstrip("> ").strip()
+                else:
+                    excerpts = re.finditer(r'[“「"]([^”」"\n]+)[”」"]' + _PAGE_REF, visible, re.I)
+                for quote in excerpts:
+                    if _quoted_page(case, profile, *quote.groups()):
+                        quoted = True
+                    else:
+                        flags.append(f"{name} | 引文未匹配所引原页：{quote[0]}")
             item = re.match(cfg["list_pattern"], value)
             caption = i + 1 < len(blocks) and blocks[i + 1][0] == "table" and any(re.match(r"^(?:\*\*)?" + re.escape(prefix) + r"\s*\d", value) for prefix in cfg["caption_prefixes"].split("|") if prefix)
+            if caption and profile is not None and handoff and _scoring_table(["|" + "|".join(blocks[i + 1][1][0][0]) + "|"]):
+                continue
             style = cfg["list_style"] if item else cfg["caption_style"] if caption else cfg["body_style"]
             if item and item.groupdict().get("number"):
                 value = cfg["list_format"].format(number=item["number"]) + value[item.end():]
             paragraph = document.add_paragraph(style=style)
-            previous = _inline(document, paragraph, value, cfg, previous)
+            render = _body_inline if profile is not None else _inline
+            previous = render(document, paragraph, value, cfg, previous)
             if caption:
                 paragraph.paragraph_format.keep_with_next = True
                 threshold = int(cfg["table_new_page_rows"])
                 paragraph.paragraph_format.page_break_before = bool(threshold and len(blocks[i + 1][1][0]) - 1 >= threshold)
         paragraphs.append(paragraph)
+        if (profile and profile.get("drawing") and quoted and not drawing_done and kind == "paragraph"
+                and not any(k == "paragraph" and v.startswith(">") for k, v in blocks[i + 1:])):
+            _layout_drawing(document, case, profile["drawing"], citations, cfg, flags, previous)
+            drawing_done = True
+    if profile is not None:
+        if profile.get("require_excerpt") and not quoted:
+            flags.append(f"{name} | 缺少附原页的设计摘录")
+        if profile.get("drawing") and not drawing_done:
+            _layout_drawing(document, case, None, set(), cfg, flags, [heading.add_run("\u200b")])
+        for paragraph in paragraphs:
+            if any(re.search(pattern, paragraph.text) for pattern in layout.get("process_patterns", [])):
+                flags.append(f"{name} | 正文过程性措辞：{paragraph.text}")
     return heading, paragraphs
 
 
@@ -722,14 +942,27 @@ def export_docx(case_dir):
                     node.text = (node.text or "").replace("{{" + key + "}}", metadata.get(key, ""))
         if cfg["footer_field"] and not any(cfg["footer_field"] in (n.text or "") for n in section.footer._element.iter(qn("w:instrText"))):
             _field(section.footer.paragraphs[0], cfg["footer_field"])
+    layout = report_layout(case)
+    flags = []
+    if layout.get("freeze"):
+        hashes = layout.get("fixed_hashes", {})
+        for filename in ("fixed-text.docx", "fixed-text-values.txt"):
+            source = case / "commission" / filename
+            actual = sha256(source.read_bytes()).hexdigest() if source.is_file() else None
+            if actual != hashes.get(filename) or (filename.endswith(".docx") and actual is None):
+                raise ValueError(f"Frozen chapter source differs from its accepted copy: {filename}")
+    fixed = _fixed_sections(case, document, flags)
+    for name in layout.get("freeze", []):
+        heading = re.sub(r"^[\d.、．\s-]+", "", _title(name, cfg))
+        if (1, name) not in order or not fixed.get(heading):
+            raise ValueError(f"Frozen chapter missing from plan or accepted source: {name}")
     output = case / "out"
     answer_sections = {}
     destinations, snapshot, answers = export_answers(case, cfg, answer_sections)
     xlsx = destinations["client"]
     registers = snapshot.parent
-    records, scores, flags = [], {}, []
+    records, scores = [], {}
     pattern = _material_pattern(case)
-    fixed = _fixed_sections(case, document, flags)
     _append_fixed(document, fixed.get("前言", []))
     in_conclusion = False
     fixed_paragraphs = []
@@ -745,7 +978,7 @@ def export_docx(case_dir):
         if fixed_paragraphs:
             heading, paragraphs = fixed_paragraphs[0], fixed_paragraphs
         elif path.exists():
-            heading, paragraphs = _section(document, path, name, level, cfg)
+            heading, paragraphs = _section(document, path, name, level, cfg, layout, flags)
         else:
             heading = document.add_heading(_title(name, cfg), level)
             paragraphs = [heading]

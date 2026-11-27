@@ -1,9 +1,9 @@
 ---
 name: learn-from-answers
-description: Propose lessons from a client's answered checkpoint sheet for the owner to review.
+description: Propose lessons from a client's feedback document or answered checkpoint sheet for the owner to review.
 ---
 
-Read each question with its basis, impact and client answer. Treat these materials and the existing library as evidence. Propose a lesson only when you can explain how the answer supports it. Preserve exceptions, distinguish client preferences from engineering practice, and avoid duplicating existing lessons. An unanswered question supplies no client decision.
+Treat supplied feedback, including descriptions of screenshots, as client evidence. Preserve the source of each observation. Read each question with its basis, impact and client answer. Treat these materials and the existing library as evidence. Propose a lesson only when you can explain how the answer supports it. Preserve exceptions, distinguish client preferences from engineering practice, and avoid duplicating existing lessons. An unanswered question supplies no client decision.
 
 Choose one scope for each lesson.
 
@@ -20,7 +20,10 @@ Save the complete proposal file with write_file at /work/learn/proposals.md. Wri
 lesson: One or two sentences.
 kind: DEFAULT
 sources: Q17
-applies: clarify-section
+applies: phase or skill
+effect: Expected effect on the report.
+tier: A (can affect a score), B (wording or process), or C (formatting). Choose one letter.
+overlap: Identify any duplication or conflict with existing lessons, or say none.
 status: proposed
 
 If no lessons are supported, save a short explanation. Save all proposals together before the token allowance ends.
