@@ -76,3 +76,23 @@ Workbook output currently supports up to 26 columns.
 
 A future template-supplied named-block renderer would join the block dispatch
 in _section. No dynamic template code loading or plugin interface exists now.
+
+Section Markdown has three destinations. Plain paragraphs go into the Word body.
+[[note:Evidence or qualification]] becomes a client-visible anchored comment.
+To keep an internal work record in the original section, put its text between
+[[internal]] and [[/internal]], each alone at the start of its own line.
+Those lines and their enclosed text contribute no body text or Word comments.
+Markers inside Markdown fenced examples are literal. Nested, unknown, inline or
+unclosed control markers produce a finding; ambiguous text stays available for
+review. The accepted fixed-chapter Word sources and checked tables are separate inputs.
+
+Offline preview from the project environment:
+  python -m reportagent.export.docx --dry-run CASE
+It writes one JSON object per event to stdout and creates no case files. Lines
+are one-based in work/sections/<section>.md. A bounded omission includes the
+original and replacement text, including the line breaks. The case layout's
+process_patterns produce one row per raw-source match. A quotation or report
+note is kept; ordinary matches request review; only a valid internal block
+can omit text. Source matches and Word paragraph flags are different counts:
+multiple source matches can share one paragraph and a merged table cell can
+appear more than once in the printed-table check. Store audit output privately.

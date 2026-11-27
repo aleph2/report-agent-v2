@@ -282,3 +282,64 @@ def test_sync_only_targets_plain_and_scored_sections(tmp_path, monkeypatch):
     prompts = [loads(p.read_text().splitlines()[0])["content"] for p in sorted((work/"runs").glob("*-sync.jsonl"))]
     assert "unique evidence" in prompts[0] and "unique evidence" not in prompts[1]
     assert all("adopted lesson sentinel" in p for p in prompts)
+
+def test_internal_channel_dry_run_and_export(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from scripts.golden import word
+
+    src = tmp_path / "work/sections"
+    src.mkdir(parents=True)
+    template = tmp_path / "commission/template"
+    template.mkdir(parents=True)
+    (template / "report-layout.toml").write_text('process_patterns=["复核人注","待核实","本次已读"]\n[sections.slope]\n')
+    text = ("# Slope\n\n[[internal]]\n复核人注：已运行工具。 [private.pdf, page 8]\n[[/internal]]\n\n"
+            "复核人注已登记，实测为 46.85 m。\n\n> 现场记录：待核实。 [design.pdf, page 1]\n\n"
+            "本次已读资料未给出地下水位。待核实地下水位。\n\n"
+            "基准 F=55.85，III级。[design.pdf, page 1][[note:Q135：按图折算 46.85 m，待核实。]]\n")
+    (src / "slope.md").write_text(text)
+    (src / "bad.md").write_text("# Bad\n\n[[internal]]\n待核实原文。\n[[mystery]]\n")
+    (src / "nested.md").write_text("# Nested\n\n[[internal]]\n甲\n[[internal]]\n乙\n[[/internal]]\n[[/internal]]\n")
+    cli = [sys.executable, "-m", "reportagent.export.docx", "--dry-run", str(tmp_path)]
+    raw = subprocess.check_output(cli)
+    assert raw == subprocess.check_output(cli)
+    assert not (tmp_path / "out").exists()
+    rows = [json.loads(line) for line in raw.splitlines()]
+    omit, = [r for r in rows if r["rule"] == "internal block" and r["action"] == "omit"]
+    assert omit["line"] == 3 and "private.pdf" in omit["before"] and not omit["after"].strip()
+    hits = {(r["line"], r["rule"], r["action"]) for r in rows if r["section"] == "slope"}
+    assert {(4, "复核人注", "omit"), (7, "复核人注", "review"), (9, "待核实", "keep"),
+            (11, "待核实", "review"), (13, "待核实", "keep")} <= hits
+    assert any(r["rule"] == "boundary" and r["action"] == "review" for r in rows if r["section"] == "bad")
+    assert all(r["action"] != "omit" for r in rows if r["section"] in ("nested", "bad"))
+    path = export_docx(tmp_path)
+    first = word(path)
+    doc = Document(path)
+    body = "\n".join(p.text for p in doc.paragraphs)
+    notes = "\n".join(n.text for n in doc.comments)
+    assert "private.pdf" not in body + notes and "已运行工具" not in body + notes
+    assert all(s in body for s in ("复核人注已登记，实测为 46.85 m。", "现场记录：待核实。", "本次已读资料未给出地下水位。待核实地下水位。",
+                                  "基准 F=55.85，III级。", "[[mystery]]", "[[internal]]", "待核实原文。"))
+    assert "Q135：按图折算 46.85 m，待核实。" in notes and "design.pdf, page 1" in notes
+    assert "boundary" in (tmp_path / "out/client-readiness.txt").read_text()
+    assert first == word(export_docx(tmp_path))
+    assert (src / "slope.md").read_text() == text
+
+
+def test_internal_markers_in_examples_and_independent_invalid_groups():
+    from reportagent.export.docx import _channels
+
+    literal = "```text\n[[internal]]\nexample\n[[/internal]]\n```\n"
+    valid = "[[internal]]\nprivate search record\n[[/internal]]\n"
+    unknown = "[[internal]]\n[[unknown]]\nvisible\n[[/internal]]\n"
+    raw = literal + valid + unknown + "[internal]\n[[/internal]]\n"
+    visible, spans, findings = _channels(raw)
+    assert spans == [(5, 7)] and [n for n, _ in findings] == [9, 12, 13]
+    assert literal in visible and unknown in visible and "[internal]" in visible
+    assert "private search record" not in visible
+
+    wrapped = "[[future:pending]]\n" + valid + "[[/future]]\n" + valid
+    visible, spans, findings = _channels(wrapped)
+    assert len(spans) == 1 and visible.count("private search record") == 1
+    assert [n for n, _ in findings] == [0, 4]
